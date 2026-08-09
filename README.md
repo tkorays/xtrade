@@ -23,6 +23,28 @@ xtrade/
 └── README.md
 ```
 
+## CLI & config
+
+The `xtrade` console script installs the top-level command group and a
+`xtrade config` subcommand group for managing runtime configuration.
+
+```bash
+uv run xtrade --help              # list subcommands
+uv run xtrade config list         # show the full config tree + file path
+uv run xtrade config get postgres.port
+uv run xtrade config set postgres.port 5433
+uv run xtrade config set postgres.host ~my-host   # ~ prefix: keep as string
+uv run xtrade config types        # list available config types (only 'main' for now)
+```
+
+The config file lives at `~/.xtrade/config.json` by default. Set the
+`XTRADE_CONFIG` environment variable to redirect to a different file
+(useful for tests and per-project overrides).
+
+Environment variables prefixed with `XTRADE_` and using `__` as the
+nested delimiter override file values, e.g.
+`XTRADE_POSTGRES__PORT=5433`.
+
 ## Quickstart
 
 Requirements: Python 3.13+, [uv](https://docs.astral.sh/uv/).

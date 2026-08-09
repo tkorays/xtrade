@@ -20,7 +20,13 @@ classifiers = [
 dependencies = [
     "numpy>=1.26",
     "pandas>=2.2",
+    "click>=8.1",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.4",
 ]
+
+[project.scripts]
+xtrade = "xtrade.cli.xtrade:cli"
 
 [project.optional-dependencies]
 dev = [
