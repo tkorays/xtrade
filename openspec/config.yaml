@@ -1,0 +1,32 @@
+schema: spec-driven
+
+# Project context (optional)
+# This is shown to AI when creating artifacts.
+context: |
+  Tech stack: Python 3.13+, pandas, numpy, asyncio
+  Domain: quantitative trading system (backtest + live trading)
+  Architecture: strategy / data / execution / risk separated modules
+  Conventions: type hints required, ruff + mypy strict, pytest, uv for deps
+  Trading rules: paper-trade first, then small-size live; strict risk limits; no hardcoded secrets
+
+# Per-artifact rules (optional)
+# Add custom rules for specific artifacts.
+# Example:
+#   rules:
+#     proposal:
+#       - Keep proposals under 500 words
+#       - Always include a "Non-goals" section
+#     tasks:
+#       - Break tasks into chunks of max 2 hours
+
+# Per-operation guidance (optional)
+# Add advisory guidance for how apply and archive work should be conducted.
+# This is separate from artifact rules above.
+# Example:
+#   operations:
+#     apply:
+#       guidance:
+#         - Keep test summaries concise
+#     archive:
+#       guidance:
+#         - Summarize the archive outcome before finishing
