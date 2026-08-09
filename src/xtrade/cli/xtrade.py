@@ -12,6 +12,7 @@ from importlib import metadata
 import click
 
 from xtrade import __version__ as _pkg_version
+from xtrade.cli.backtest import backtest as backtest_cmd
 from xtrade.cli.config import config as config_cmd
 from xtrade.core.logging import setup_logging
 
@@ -34,6 +35,7 @@ def cli() -> None:
 
 
 cli.add_command(config_cmd)
+cli.add_command(backtest_cmd)
 
 
 if __name__ == "__main__":

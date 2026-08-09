@@ -6,7 +6,6 @@ from datetime import date
 from typing import Any, Protocol
 
 import pandas as pd
-from sqlalchemy.engine import Connection
 
 from xtrade.data.engine import get_connection
 
