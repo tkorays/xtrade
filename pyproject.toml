@@ -23,6 +23,10 @@ dependencies = [
     "click>=8.1",
     "pydantic>=2.7",
     "pydantic-settings>=2.4",
+    "sqlalchemy>=2.0",
+    "psycopg[binary]>=3.1",
+    "alembic>=1.13",
+    "pyarrow>=15",
 ]
 
 [project.scripts]
@@ -110,5 +114,12 @@ dev = [
     "pytest-cov>=5.0",
     "ruff>=0.6",
     "mypy>=1.10",
+    "pandas-stubs>=2.2",
     "pre-commit>=3.8",
 ]
+
+# ---------------------------------------------------------------------------
+# alembic
+# ---------------------------------------------------------------------------
+[tool.alembic]
+script_location = "src/xtrade/data/migrations"

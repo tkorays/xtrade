@@ -37,6 +37,24 @@ class PostgresConfig(BaseModel):
     database: str = "xtrade"
 
 
+class DataDatabaseConfig(BaseModel):
+    """SQLAlchemy DSN for the data-layer database."""
+
+    # SQLAlchemy URL with the ``postgresql+psycopg`` driver prefix so the
+    # data layer can construct the correct dialect directly. Bare
+    # ``postgresql://`` URIs are accepted and normalised at engine-build
+    # time — see :func:`xtrade.data.engine.create_engine`.
+    url: str = "postgresql+psycopg://postgres:postgres@localhost:5432/xtrade"
+
+
+class DataConfig(BaseModel):
+    """Configuration for the data layer (DB connection + batch size)."""
+
+    database: DataDatabaseConfig = Field(default_factory=DataDatabaseConfig)
+    # ``KLineRepository.upsert_bars`` flushes rows in chunks of this size.
+    batch_size: int = 10_000
+
+
 class Config(BaseConfig):
     """Main ``xtrade`` application config, located at
     :data:`DEFAULT_CONFIG_PATH` (``~/.xtrade/config.json`` by default).
@@ -52,6 +70,7 @@ class Config(BaseConfig):
     config_file_path: ClassVar[Path] = DEFAULT_CONFIG_PATH
 
     postgres: PostgresConfig = Field(default_factory=PostgresConfig)
+    data: DataConfig = Field(default_factory=DataConfig)
 
     @classmethod
     def settings_customise_sources(

@@ -13,6 +13,8 @@ from xtrade.core.config import (
     DEFAULT_CONFIG_PATH,
     DEFAULT_XTRADE_HOME,
     Config,
+    DataConfig,
+    DataDatabaseConfig,
     PostgresConfig,
     get_config,
 )
@@ -36,6 +38,8 @@ def _ensure_clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "XTRADE_CONFIG",
         "XTRADE_POSTGRES__HOST",
         "XTRADE_POSTGRES__PORT",
+        "XTRADE_DATA__DATABASE__URL",
+        "XTRADE_DATA__BATCH_SIZE",
     ):
         monkeypatch.delenv(var, raising=False)
 
@@ -235,3 +239,89 @@ def test_no_mos_dependency_in_manifest() -> None:
     assert '"mos' not in text
     assert "mos-core" not in text
     assert "mos_quant" not in text
+
+
+# ---------------------------------------------------------------------------
+# Data layer config (added in add-data-system)
+# ---------------------------------------------------------------------------
+
+
+def test_data_defaults_when_no_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, reset_global_config: None
+) -> None:
+    monkeypatch.setenv("XTRADE_CONFIG", str(tmp_path / "missing.json"))
+    cfg = Config.load()
+
+    assert cfg.data.database.url == "postgresql+psycopg://postgres:postgres@localhost:5432/xtrade"
+    assert cfg.data.batch_size == 10_000
+
+
+def test_existing_user_file_without_data_block_still_loads(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, reset_global_config: None
+) -> None:
+    """A pre-existing ``postgres``-only config file must still load."""
+    target = tmp_path / "legacy.json"
+    target.write_text(
+        json.dumps({"postgres": {"host": "legacy-host", "port": 6543}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("XTRADE_CONFIG", str(target))
+
+    cfg = Config.load()
+
+    assert cfg.postgres.host == "legacy-host"
+    assert cfg.postgres.port == 6543
+    # Defaults kick in for the new ``data`` section.
+    assert cfg.data.database.url == "postgresql+psycopg://postgres:postgres@localhost:5432/xtrade"
+    assert cfg.data.batch_size == 10_000
+
+
+def test_data_user_supplied_block_round_trips(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, reset_global_config: None
+) -> None:
+    monkeypatch.setenv("XTRADE_CONFIG", str(tmp_path / "rt.json"))
+
+    cfg = Config.load()
+    cfg.data.database.url = "postgresql+psycopg://u:p@h:5432/d"
+    cfg.data.batch_size = 5000
+    cfg.save()
+
+    reloaded = Config.load()
+    assert reloaded.data.database.url == "postgresql+psycopg://u:p@h:5432/d"
+    assert reloaded.data.batch_size == 5000
+
+
+def test_xtrade_data_env_vars_override_file_value(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, reset_global_config: None
+) -> None:
+    target = tmp_path / "override.json"
+    target.write_text(
+        json.dumps({"data": {"batch_size": 5000}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("XTRADE_CONFIG", str(target))
+    monkeypatch.setenv("XTRADE_DATA__BATCH_SIZE", "20000")
+
+    cfg = Config.load()
+
+    assert cfg.data.batch_size == 20000
+
+
+def test_xtrade_data_env_var_nested_database_url(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, reset_global_config: None
+) -> None:
+    monkeypatch.setenv("XTRADE_CONFIG", str(tmp_path / "nested.json"))
+    monkeypatch.setenv("XTRADE_DATA__DATABASE__URL", "postgresql+psycopg://other:5432/d")
+
+    cfg = Config.load()
+
+    assert cfg.data.database.url == "postgresql+psycopg://other:5432/d"
+
+
+def test_data_database_config_direct_instantiation() -> None:
+    db = DataDatabaseConfig(url="postgresql+psycopg://x/y")
+    assert db.url == "postgresql+psycopg://x/y"
+
+    data = DataConfig()
+    assert data.batch_size == 10_000
+    assert data.database.url == "postgresql+psycopg://postgres:postgres@localhost:5432/xtrade"
