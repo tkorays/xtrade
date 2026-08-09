@@ -19,7 +19,8 @@ from xtrade.data.orm.broker import (
 from xtrade.data.orm.market import (
     AdjustmentFactorORM,
     InstrumentORM,
-    KLineORM,
+    KLine1dORM,
+    KLine1mORM,
     TradeCalendarORM,
 )
 
@@ -27,7 +28,8 @@ __all__ = [
     "AccountORM",
     "AdjustmentFactorORM",
     "InstrumentORM",
-    "KLineORM",
+    "KLine1dORM",
+    "KLine1mORM",
     "OrderORM",
     "PositionORM",
     "TradeCalendarORM",

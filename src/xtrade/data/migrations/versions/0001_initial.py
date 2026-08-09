@@ -6,7 +6,7 @@ Create Date: 2026-08-09
 
 Creates every table required by :mod:`xtrade.data.orm`:
 
-- kline, adjustment_factor, trade_calendar, instrument (market data)
+- kline_1d, kline_1m, adjustment_factor, trade_calendar, instrument (market data)
 - order, trade, position, account (broker data)
 
 Unique constraints and indexes mirror the ORM metadata. This migration is
@@ -30,22 +30,34 @@ def upgrade() -> None:
     # ---- market data ----
 
     op.create_table(
-        "kline",
-        sa.Column("id", sa.BigInteger(), primary_key=True, autoincrement=True),
+        "kline_1d",
         sa.Column("symbol", sa.String(length=64), nullable=False),
-        sa.Column("time", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("interval", sa.String(length=8), nullable=False),
+        sa.Column("trade_date", sa.Date(), nullable=False),
         sa.Column("open", sa.Numeric(20, 6), nullable=False),
         sa.Column("high", sa.Numeric(20, 6), nullable=False),
         sa.Column("low", sa.Numeric(20, 6), nullable=False),
         sa.Column("close", sa.Numeric(20, 6), nullable=False),
         sa.Column("volume", sa.BigInteger(), nullable=False),
         sa.Column("amount", sa.Numeric(20, 4), nullable=False),
-        sa.Column("pre_close", sa.Numeric(20, 6), nullable=True),
-        sa.UniqueConstraint("symbol", "time", "interval", name="uq_kline_symbol_time_interval"),
+        sa.PrimaryKeyConstraint("symbol", "trade_date", name="pk_kline_1d"),
+        sa.UniqueConstraint("symbol", "trade_date", name="uq_kline_1d_symbol_trade_date"),
     )
-    op.create_index("ix_kline_symbol_time", "kline", ["symbol", "time"])
-    op.create_index("ix_kline_time", "kline", ["time"])
+    op.create_index("ix_kline_1d_symbol_trade_date", "kline_1d", ["symbol", "trade_date"])
+
+    op.create_table(
+        "kline_1m",
+        sa.Column("symbol", sa.String(length=64), nullable=False),
+        sa.Column("ts", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("open", sa.Numeric(20, 6), nullable=False),
+        sa.Column("high", sa.Numeric(20, 6), nullable=False),
+        sa.Column("low", sa.Numeric(20, 6), nullable=False),
+        sa.Column("close", sa.Numeric(20, 6), nullable=False),
+        sa.Column("volume", sa.BigInteger(), nullable=False),
+        sa.Column("amount", sa.Numeric(20, 4), nullable=False),
+        sa.PrimaryKeyConstraint("symbol", "ts", name="pk_kline_1m"),
+        sa.UniqueConstraint("symbol", "ts", name="uq_kline_1m_symbol_ts"),
+    )
+    op.create_index("ix_kline_1m_symbol_ts", "kline_1m", ["symbol", "ts"])
 
     op.create_table(
         "adjustment_factor",
@@ -185,6 +197,8 @@ def downgrade() -> None:
     op.drop_index("ix_adjustment_factor_symbol", table_name="adjustment_factor")
     op.drop_table("adjustment_factor")
 
-    op.drop_index("ix_kline_time", table_name="kline")
-    op.drop_index("ix_kline_symbol_time", table_name="kline")
-    op.drop_table("kline")
+    op.drop_index("ix_kline_1m_symbol_ts", table_name="kline_1m")
+    op.drop_table("kline_1m")
+
+    op.drop_index("ix_kline_1d_symbol_trade_date", table_name="kline_1d")
+    op.drop_table("kline_1d")

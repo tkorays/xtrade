@@ -1,10 +1,4 @@
-# Capability: data-migrations
-
-## Purpose
-
-Provides schema management for the data layer using Alembic, with one initial migration that creates every market-data and broker-data table plus required indexes. The migration system SHALL be runnable both as part of project setup and in CI smoke tests.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Alembic is wired to the data layer
 
@@ -67,3 +61,11 @@ The `src/xtrade/data/migrations/` directory SHALL be importable / discoverable a
 
 - **WHEN** a developer inspects `pyproject.toml`'s `[tool.alembic]` section (or the `alembic.ini` if used)
 - **THEN** the script location is `src/xtrade/data/migrations`
+
+## REMOVED Requirements
+
+### Requirement: Initial migration creates a single `kline` table
+
+**Reason**: K-line storage is split into `kline_1d` and `kline_1m`. The single `kline` table is replaced entirely; the migration SHALL NOT create it.
+
+**Migration**: The current `0001_initial.py` SHALL be edited (or replaced) so that it issues `CREATE TABLE kline_1d (...)` and `CREATE TABLE kline_1m (...)` instead of `CREATE TABLE kline (...)`. The `downgrade()` branch SHALL `DROP TABLE kline_1m` and `DROP TABLE kline_1d`. Any pre-existing `kline` table in the development database SHALL be dropped manually during the change (the project is in development with no retained data).

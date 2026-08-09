@@ -7,7 +7,8 @@ import subprocess
 from .conftest import skip_without_db
 
 EXPECTED_TABLES: set[str] = {
-    "kline",
+    "kline_1d",
+    "kline_1m",
     "adjustment_factor",
     "trade_calendar",
     "instrument",

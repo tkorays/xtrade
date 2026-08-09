@@ -4,6 +4,11 @@ These models exist primarily so Alembic can introspect the table schema
 and so future code can map row tuples into typed objects when convenient.
 The hot paths (K-line, adjustment factor, trade calendar) read and write
 via raw ``Connection`` — see :mod:`xtrade.data.market_data`.
+
+K-lines are stored in two physical tables, one per supported frequency:
+``kline_1d`` (daily) and ``kline_1m`` (1-minute). The ``interval`` column
+is implicit (encoded by the table name) and no ``pre_close`` column is
+kept.
 """
 
 from __future__ import annotations
@@ -26,27 +31,42 @@ from sqlalchemy.orm import Mapped, mapped_column
 from xtrade.data.orm_base import Base
 
 
-class KLineORM(Base):
-    """K-line bar (one row per ``(symbol, time, interval)``)."""
+class KLine1dORM(Base):
+    """K-line daily bar (one row per ``(symbol, trade_date)``)."""
 
-    __tablename__ = "kline"
+    __tablename__ = "kline_1d"
     __table_args__ = (
-        UniqueConstraint("symbol", "time", "interval", name="uq_kline_symbol_time_interval"),
-        Index("ix_kline_symbol_time", "symbol", "time"),
-        Index("ix_kline_time", "time"),
+        UniqueConstraint("symbol", "trade_date", name="uq_kline_1d_symbol_trade_date"),
+        Index("ix_kline_1d_symbol_trade_date", "symbol", "trade_date"),
     )
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    symbol: Mapped[str] = mapped_column(String(64), nullable=False)
-    time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    interval: Mapped[str] = mapped_column(String(8), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(64), primary_key=True)
+    trade_date: Mapped[date] = mapped_column(Date, primary_key=True)
     open: Mapped[D] = mapped_column(Numeric(20, 6), nullable=False)
     high: Mapped[D] = mapped_column(Numeric(20, 6), nullable=False)
     low: Mapped[D] = mapped_column(Numeric(20, 6), nullable=False)
     close: Mapped[D] = mapped_column(Numeric(20, 6), nullable=False)
     volume: Mapped[int] = mapped_column(BigInteger, nullable=False)
     amount: Mapped[D] = mapped_column(Numeric(20, 4), nullable=False)
-    pre_close: Mapped[D | None] = mapped_column(Numeric(20, 6), nullable=True)
+
+
+class KLine1mORM(Base):
+    """K-line 1-minute bar (one row per ``(symbol, ts)``)."""
+
+    __tablename__ = "kline_1m"
+    __table_args__ = (
+        UniqueConstraint("symbol", "ts", name="uq_kline_1m_symbol_ts"),
+        Index("ix_kline_1m_symbol_ts", "symbol", "ts"),
+    )
+
+    symbol: Mapped[str] = mapped_column(String(64), primary_key=True)
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), primary_key=True)
+    open: Mapped[D] = mapped_column(Numeric(20, 6), nullable=False)
+    high: Mapped[D] = mapped_column(Numeric(20, 6), nullable=False)
+    low: Mapped[D] = mapped_column(Numeric(20, 6), nullable=False)
+    close: Mapped[D] = mapped_column(Numeric(20, 6), nullable=False)
+    volume: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    amount: Mapped[D] = mapped_column(Numeric(20, 4), nullable=False)
 
 
 class AdjustmentFactorORM(Base):
@@ -89,6 +109,7 @@ class InstrumentORM(Base):
 __all__ = [
     "AdjustmentFactorORM",
     "InstrumentORM",
-    "KLineORM",
+    "KLine1dORM",
+    "KLine1mORM",
     "TradeCalendarORM",
 ]

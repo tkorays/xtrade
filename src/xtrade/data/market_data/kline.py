@@ -3,9 +3,17 @@
 The :class:`KLineRepository` Protocol defines the public contract.
 :class:`PostgresKLineRepository` is the only implementation in this change.
 
+K-lines are stored in two physical tables, one per supported frequency:
+``kline_1d`` (daily, primary key ``(symbol, trade_date)``) and ``kline_1m``
+(1-minute, primary key ``(symbol, ts)``). The repository routes reads and
+writes to the correct table based on the ``interval`` argument; the public
+``Protocol`` interface is unchanged.
+
 Adjustment logic (backward / forward / none) is computed on the read
 path from a discrete factor table (see :mod:`xtrade.data.market_data.adj_factor`).
-Raw prices are stored once and never mutated.
+Raw prices are stored once and never mutated. No ``pre_close`` column is
+kept; callers that need the previous bar's close must compute it themselves
+(e.g. ``df["close"].shift(1)``).
 """
 
 from __future__ import annotations
@@ -14,21 +22,26 @@ import csv
 import io
 from datetime import date, datetime
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
+from typing import Any, Literal, Protocol, cast
 
 import pandas as pd
 from sqlalchemy.engine import Connection
 
 from xtrade.data.engine import get_connection
 
-if TYPE_CHECKING:
-    pass
-
-INTERVALS: frozenset[str] = frozenset({"1d", "1m", "5m", "15m", "30m", "60m"})
+INTERVALS: frozenset[str] = frozenset({"1d", "1m"})
 
 AdjustMode = Literal["none", "backward", "forward"]
 
+# Mapping from a supported interval to (physical table name, time column name).
+_ROUTE: dict[str, tuple[str, str]] = {
+    "1d": ("kline_1d", "trade_date"),
+    "1m": ("kline_1m", "ts"),
+}
+
 # Required columns on incoming DataFrames for ``upsert_bars``.
+# Note: ``interval`` is still required because it drives the routing decision;
+# the value is not persisted.
 KLINE_REQUIRED_COLUMNS: tuple[str, ...] = (
     "symbol",
     "time",
@@ -79,6 +92,15 @@ def _check_interval(interval: str) -> None:
         raise ValueError(f"unsupported interval {interval!r}; expected one of {sorted(INTERVALS)}")
 
 
+def _route_table(interval: str) -> tuple[str, str]:
+    """Resolve ``interval`` to ``(table_name, time_column)``.
+
+    Raises ``ValueError`` for unknown intervals.
+    """
+    _check_interval(interval)
+    return _ROUTE[interval]
+
+
 class PostgresKLineRepository:
     """Postgres-backed K-line repository.
 
@@ -100,73 +122,86 @@ class PostgresKLineRepository:
         existing tuple instead of failing on the unique constraint.
 
         ``df`` must include the columns in
-        :data:`KLINE_REQUIRED_COLUMNS` plus optional ``pre_close``.
+        :data:`KLINE_REQUIRED_COLUMNS`. The ``interval`` column must be
+        uniform across the frame (it determines the target table); a
+        mixed frame raises ``ValueError``.
         """
         if df.empty:
             return 0
         missing = [c for c in KLINE_REQUIRED_COLUMNS if c not in df.columns]
         if missing:
             raise ValueError(f"upsert_bars: missing required columns: {missing}")
-        # Row-by-row datetime normalisation so psycopg's CSV format does
-        # not choke on mixed-precision pandas timestamps.
+        # ``interval`` must be uniform — the physical table is implied by it.
+        intervals = df["interval"].astype(str).unique()
+        if len(intervals) != 1:
+            raise ValueError(
+                f"upsert_bars: interval column must be uniform, got {sorted(intervals.tolist())}"
+            )
+        interval = intervals[0]
+        table, time_col = _route_table(interval)
+
         df = df.copy()
         df["time"] = pd.to_datetime(df["time"], utc=True)
         df["interval"] = df["interval"].astype(str)
-        if "pre_close" not in df.columns:
-            df["pre_close"] = pd.NA
+        # Rename the time column to the target table's column name.
+        if time_col != "time":
+            df = df.rename(columns={"time": time_col})
 
         rows_written = 0
         with get_connection() as conn:
             for chunk_start in range(0, len(df), self._batch_size):
                 chunk = df.iloc[chunk_start : chunk_start + self._batch_size]
-                rows_written += self._upsert_chunk(conn, chunk)
+                rows_written += self._upsert_chunk(conn, chunk, table, time_col)
         return rows_written
 
-    def _upsert_chunk(self, conn: Connection, chunk: pd.DataFrame) -> int:
+    def _upsert_chunk(
+        self,
+        conn: Connection,
+        chunk: pd.DataFrame,
+        table: str,
+        time_col: str,
+    ) -> int:
         """Upsert a chunk using a single COPY + ON CONFLICT statement pair.
 
         Implementation note: ``COPY`` itself cannot upsert, so we
         temporarily insert rows into a staging table, then merge into
-        ``kline`` via ``INSERT ... ON CONFLICT ... DO UPDATE``. The
-        staging table is created on demand and dropped at the end of the
-        statement (so concurrent writers don't collide).
+        the target K-line table via ``INSERT ... ON CONFLICT ... DO UPDATE``.
+        The staging table is created on demand and dropped at the end of
+        the statement (so concurrent writers don't collide).
         """
         if chunk.empty:
             return 0
 
-        # Stage rows in a temporary, session-scoped table, then upsert
-        # into ``kline`` via ON CONFLICT. Doing this inside a single
-        # transaction (the ``get_connection`` context) keeps it atomic.
+        data_cols = ["symbol", time_col, "open", "high", "low", "close", "volume", "amount"]
+        stage_name = f"kline_stage_{table[len('kline_') :]}"
+
         staging_sql = (
-            "CREATE TEMP TABLE IF NOT EXISTS kline_stage ("
+            f"CREATE TEMP TABLE IF NOT EXISTS {stage_name} ("
             "  symbol TEXT NOT NULL,"
-            "  time TIMESTAMPTZ NOT NULL,"
-            "  interval TEXT NOT NULL,"
+            f"  {time_col} {'TIMESTAMPTZ' if time_col == 'ts' else 'DATE'} NOT NULL,"
             "  open NUMERIC(20, 6) NOT NULL,"
             "  high NUMERIC(20, 6) NOT NULL,"
             "  low NUMERIC(20, 6) NOT NULL,"
             "  close NUMERIC(20, 6) NOT NULL,"
             "  volume BIGINT NOT NULL,"
-            "  amount NUMERIC(20, 4) NOT NULL,"
-            "  pre_close NUMERIC(20, 6)"
+            "  amount NUMERIC(20, 4) NOT NULL"
             ") ON COMMIT DROP"
         )
         upsert_sql = (
-            "INSERT INTO kline (symbol, time, interval, open, high, low, close, volume, amount, pre_close)"
-            " SELECT symbol, time, interval, open, high, low, close, volume, amount, pre_close"
-            " FROM kline_stage"
-            " ON CONFLICT (symbol, time, interval) DO UPDATE SET"
+            f"INSERT INTO {table} (symbol, {time_col}, open, high, low, close, volume, amount)"
+            f" SELECT symbol, {time_col}, open, high, low, close, volume, amount"
+            f" FROM {stage_name}"
+            f" ON CONFLICT (symbol, {time_col}) DO UPDATE SET"
             "   open = EXCLUDED.open,"
             "   high = EXCLUDED.high,"
             "   low = EXCLUDED.low,"
             "   close = EXCLUDED.close,"
             "   volume = EXCLUDED.volume,"
-            "   amount = EXCLUDED.amount,"
-            "   pre_close = EXCLUDED.pre_close"
+            "   amount = EXCLUDED.amount"
         )
 
         conn.exec_driver_sql(staging_sql)
-        self._copy_into_staging(conn, chunk)
+        self._copy_into_staging(conn, chunk, stage_name, data_cols)
         result = conn.exec_driver_sql(upsert_sql)
         # ``cursor.rowcount`` is set after the underlying psycopg cursor
         # is consumed; SQLAlchemy's ``Connection`` exposes it via
@@ -174,8 +209,13 @@ class PostgresKLineRepository:
         return int(result.rowcount or 0)
 
     @staticmethod
-    def _copy_into_staging(conn: Connection, chunk: pd.DataFrame) -> None:
-        """Stream ``chunk`` into the ``kline_stage`` temp table via ``COPY FROM STDIN``."""
+    def _copy_into_staging(
+        conn: Connection,
+        chunk: pd.DataFrame,
+        stage_name: str,
+        data_cols: list[str],
+    ) -> None:
+        """Stream ``chunk`` into the staging temp table via ``COPY FROM STDIN``."""
         buf = io.StringIO()
         writer = csv.writer(buf, lineterminator="\n")
         for row in chunk.itertuples(index=False, name=None):
@@ -191,10 +231,10 @@ class PostgresKLineRepository:
                     out.append(value)
             writer.writerow(out)
         raw: Any = conn.connection.driver_connection  # psycopg.Connection
+        col_list = ", ".join(data_cols)
         with raw.cursor() as cursor:
             cursor.copy_expert(
-                "COPY kline_stage (symbol, time, interval, open, high, low, close, volume, amount, pre_close)"
-                " FROM STDIN WITH (FORMAT csv)",
+                f"COPY {stage_name} ({col_list}) FROM STDIN WITH (FORMAT csv)",
                 io.StringIO(buf.getvalue()),
             )
 
@@ -209,21 +249,19 @@ class PostgresKLineRepository:
         adjust: AdjustMode = "none",
     ) -> dict[str, pd.DataFrame]:
         """Read K-line bars for ``symbols`` in ``[start, end]`` at ``interval``."""
-        _check_interval(interval)
+        table, time_col = _route_table(interval)
         if not symbols:
             return {}
 
         sql = (
-            "SELECT symbol, time, open, high, low, close, volume, amount, pre_close"
-            " FROM kline"
-            " WHERE interval = %(interval)s"
-            "   AND symbol = ANY(%(symbols)s)"
-            "   AND time >= %(start)s"
-            "   AND time <= %(end)s"
+            f"SELECT symbol, {time_col}, open, high, low, close, volume, amount"
+            f" FROM {table}"
+            f" WHERE symbol = ANY(%(symbols)s)"
+            f"   AND {time_col} >= %(start)s"
+            f"   AND {time_col} <= %(end)s"
             " ORDER BY symbol, time"
         )
         params: dict[str, Any] = {
-            "interval": interval,
             "symbols": list(symbols),
             "start": start,
             "end": end,
@@ -237,11 +275,12 @@ class PostgresKLineRepository:
         if df.empty:
             return {s: pd.DataFrame() for s in symbols}
 
-        df["time"] = pd.to_datetime(df["time"], utc=True)
+        df[time_col] = pd.to_datetime(df[time_col], utc=True)
         result: dict[str, pd.DataFrame] = {}
         for sym_obj, group in df.groupby("symbol", sort=False):
             sym = cast("str", sym_obj)
-            sym_df = group.drop(columns=["symbol"]).set_index("time").sort_index()
+            sym_df = group.drop(columns=["symbol"]).set_index(time_col).sort_index()
+            sym_df.index.name = time_col
             result[sym] = sym_df
 
         if adjust in ("backward", "forward"):
@@ -296,18 +335,21 @@ class PostgresKLineRepository:
         return frames
 
     def count(self, symbol: str | None = None, interval: str | None = None) -> int:
-        """Return the row count matching the given filters."""
+        """Return the row count matching the given filters.
+
+        ``interval`` is required to route the count to the correct physical
+        table (``kline_1d`` or ``kline_1m``).
+        """
+        if interval is None:
+            raise ValueError("count: interval is required to route to the correct table")
+        table, _ = _route_table(interval)
         clauses: list[str] = []
         params: dict[str, object] = {}
         if symbol is not None:
             clauses.append("symbol = %(symbol)s")
             params["symbol"] = symbol
-        if interval is not None:
-            _check_interval(interval)
-            clauses.append("interval = %(interval)s")
-            params["interval"] = interval
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-        sql = f"SELECT COUNT(*) FROM kline {where}"
+        sql = f"SELECT COUNT(*) FROM {table} {where}"
         with get_connection() as conn:
             return int(conn.exec_driver_sql(sql, params).scalar() or 0)
 

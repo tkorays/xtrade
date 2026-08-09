@@ -1,10 +1,4 @@
-# Capability: data-market
-
-## Purpose
-
-Provides durable storage for market reference data (bars, adjustment factors, trade calendar, instruments) with a DataFrame-shaped public interface and a strict two-path contract: high-throughput reads/writes for time-series data use native `Connection.cursor()` (`COPY` or `executemany` + `INSERT ... ON CONFLICT`); small reference tables use SQLAlchemy 2.x ORM. Adjustment (backward / forward) is computed on the read path from a discrete factor table, never stored pre-applied.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Repository pattern for market data
 
@@ -132,3 +126,11 @@ Market-data repositories SHALL NOT make network calls. They read and write only 
 
 - **WHEN** a developer inspects the imports in `src/xtrade/data/market_data/kline.py`
 - **THEN** no module from `xtrade.data.sources` is imported
+
+## REMOVED Requirements
+
+### Requirement: Single K-line table with `interval` column and `pre_close`
+
+**Reason**: The K-line table is split into per-frequency physical tables (`kline_1d`, `kline_1m`). The `interval` column becomes implicit (encoded by the table name) and the `pre_close` column had no producer or consumer and is removed. Adjustment remains fully recoverable from the `adj_factor` table on the read path.
+
+**Migration**: Callers that previously wrote `pre_close` must drop that column from their input DataFrames (the repository WILL reject it implicitly because it is no longer COPY'ed). Callers that previously read `pre_close` from `get_bars` output must compute the previous-bar value themselves (e.g. `df["close"].shift(1)`) or query `adj_factor` directly. Callers that previously relied on `df.index.name == "time"` now see `"trade_date"` for daily and `"ts"` for 1-minute.
