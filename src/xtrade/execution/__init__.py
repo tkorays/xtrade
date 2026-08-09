@@ -1,3 +1,6 @@
-"""Execution: backtest broker and live broker adapters."""
+"""xtrade execution: business-level broker abstraction.
 
-__all__: list[str] = []
+See :mod:`xtrade.execution.broker` for the ``Broker`` Protocol and its
+two implementations (``InMemoryBroker`` for backtests / unit tests,
+``PostgresBroker`` for paper / live runs).
+"""
