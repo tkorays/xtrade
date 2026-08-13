@@ -51,12 +51,18 @@ class KLine1dORM(Base):
 
 
 class KLine1mORM(Base):
-    """K-line 1-minute bar (one row per ``(symbol, ts)``)."""
+    """K-line 1-minute bar (one row per ``(symbol, ts)``).
+
+    The underlying ``kline_1m`` table is a TimescaleDB **hypertable**
+    (see ``0001_initial.py`` for the DDL) with ``chunk_time_interval = 1 day``
+    and a 7-day compression policy segmentby ``symbol``. The redundant
+    ``(symbol, ts)`` index is intentionally omitted from ``__table_args__``
+    because TimescaleDB creates an equivalent index for chunk metadata.
+    """
 
     __tablename__ = "kline_1m"
     __table_args__ = (
         UniqueConstraint("symbol", "ts", name="uq_kline_1m_symbol_ts"),
-        Index("ix_kline_1m_symbol_ts", "symbol", "ts"),
     )
 
     symbol: Mapped[str] = mapped_column(String(64), primary_key=True)

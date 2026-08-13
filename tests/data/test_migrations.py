@@ -90,3 +90,31 @@ def test_alembic_offline_sql_generation() -> None:
         assert f"CREATE TABLE {table} (" in sql or f'CREATE TABLE "{table}" (' in sql, (
             f"missing CREATE TABLE for {table}"
         )
+
+
+def test_alembic_offline_sql_creates_timescaledb_hypertable() -> None:
+    """The offline SQL must include TimescaleDB DDL for ``kline_1m``."""
+    result = subprocess.run(
+        ["uv", "run", "alembic", "upgrade", "head", "--sql"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, f"alembic failed: {result.stderr}"
+    sql = result.stdout
+    # TimescaleDB extension creation (emitted as ``CREATE EXTENSION IF NOT EXISTS timescaledb;``).
+    assert "CREATE EXTENSION" in sql and "timescaledb" in sql, (
+        "missing CREATE EXTENSION timescaledb"
+    )
+    # Hypertable conversion for kline_1m.
+    assert "create_hypertable" in sql and "'kline_1m'" in sql and "'ts'" in sql, (
+        "missing create_hypertable('kline_1m', 'ts', ...) call"
+    )
+    # Compression policy.
+    assert "add_compression_policy" in sql and "'kline_1m'" in sql, (
+        "missing add_compression_policy('kline_1m', ...) call"
+    )
+    # The redundant index is intentionally omitted (TimescaleDB manages its own).
+    assert "CREATE INDEX ix_kline_1m_symbol_ts" not in sql, (
+        "redundant index ix_kline_1m_symbol_ts should not be created"
+    )

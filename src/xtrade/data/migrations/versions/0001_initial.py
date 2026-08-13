@@ -11,6 +11,15 @@ Creates every table required by :mod:`xtrade.data.orm`:
 
 Unique constraints and indexes mirror the ORM metadata. This migration is
 intentionally data-free: no ``INSERT`` / ``bulk_insert`` calls.
+
+TimescaleDB:
+- ``kline_1m`` is converted to a hypertable with ``chunk_time_interval = 1 day``
+  and a compression policy that compresses chunks older than 7 days.
+- ``kline_1d`` stays a regular Postgres table.
+- The migration requires the ``timescaledb`` extension to be available on the
+  server (``shared_preload_libraries`` must include ``timescaledb`` and the
+  user running the migration must have CREATE EXTENSION privilege). The
+  migration aborts cleanly otherwise.
 """
 
 from __future__ import annotations
@@ -27,6 +36,12 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
+    # ---- TimescaleDB extension ----
+    # Required for ``kline_1m`` to be a hypertable. The statement is
+    # idempotent (``IF NOT EXISTS``) so re-running ``alembic upgrade head``
+    # does not fail.
+    op.execute("CREATE EXTENSION IF NOT EXISTS timescaledb")
+
     # ---- market data ----
 
     op.create_table(
@@ -57,7 +72,30 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("symbol", "ts", name="pk_kline_1m"),
         sa.UniqueConstraint("symbol", "ts", name="uq_kline_1m_symbol_ts"),
     )
-    op.create_index("ix_kline_1m_symbol_ts", "kline_1m", ["symbol", "ts"])
+    # NOTE: ``ix_kline_1m_symbol_ts`` is intentionally omitted — TimescaleDB
+    # creates an equivalent index on ``(symbol, ts DESC)`` for chunk metadata.
+    # A redundant index wastes space and slows writes.
+
+    # ---- kline_1m as a TimescaleDB hypertable ----
+    op.execute(
+        "SELECT create_hypertable("
+        "  'kline_1m', 'ts',"
+        "  chunk_time_interval => INTERVAL '1 day',"
+        "  if_not_exists => TRUE"
+        ")"
+    )
+    # Compression: chunks older than 7 days are compressed; segment by
+    # ``symbol`` so per-symbol range scans read fewer compressed blocks.
+    op.execute(
+        "ALTER TABLE kline_1m SET ("
+        "  timescaledb.compress,"
+        "  timescaledb.compress_segmentby = 'symbol',"
+        "  timescaledb.compress_orderby = 'ts'"
+        ")"
+    )
+    op.execute(
+        "SELECT add_compression_policy('kline_1m', INTERVAL '7 days')"
+    )
 
     op.create_table(
         "adjustment_factor",
@@ -197,7 +235,12 @@ def downgrade() -> None:
     op.drop_index("ix_adjustment_factor_symbol", table_name="adjustment_factor")
     op.drop_table("adjustment_factor")
 
-    op.drop_index("ix_kline_1m_symbol_ts", table_name="kline_1m")
+    # ``kline_1m`` is a hypertable; TimescaleDB automatically removes the
+    # compression policy and chunks when the table is dropped, but we call
+    # ``remove_compression_policy`` explicitly so the SQL log is deterministic
+    # in ``alembic downgrade --sql`` mode. ``if_exists => TRUE`` makes this
+    # safe to call when no policy exists.
+    op.execute("SELECT remove_compression_policy('kline_1m', if_exists => TRUE)")
     op.drop_table("kline_1m")
 
     op.drop_index("ix_kline_1d_symbol_trade_date", table_name="kline_1d")

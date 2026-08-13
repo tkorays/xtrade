@@ -1,22 +1,4 @@
-# Capability: data-migrations
-
-## Purpose
-
-Provides schema management for the data layer using Alembic, with one initial migration that creates every market-data and broker-data table plus required indexes. The migration system SHALL be runnable both as part of project setup and in CI smoke tests.
-## Requirements
-### Requirement: Alembic is wired to the data layer
-
-The project SHALL include a configured `alembic` environment under `src/xtrade/data/migrations/` with `env.py`, `script.py.mako`, and `versions/`. The `env.py` SHALL read the database URL from `Config.data.database.url` and use the same SQLAlchemy `Base` declared by `xtrade.data.orm_base.Base`.
-
-#### Scenario: `alembic` CLI works against a configured URL
-
-- **WHEN** a developer sets `XTRADE_DATA__DATABASE__URL=postgresql+psycopg://...` and runs `uv run alembic upgrade head` from the repo root
-- **THEN** the migration applies against the configured database without any other CLI flags
-
-#### Scenario: `env.py` does not hardcode a DSN
-
-- **WHEN** a developer inspects `src/xtrade/data/migrations/env.py`
-- **THEN** no `postgresql://` literal appears in the file; the DSN is read via `Config` or `os.environ`
+## MODIFIED Requirements
 
 ### Requirement: Initial migration creates all tables
 
@@ -52,22 +34,3 @@ The K-line tables SHALL be `kline_1d` (regular Postgres table with primary key `
 
 - **WHEN** a developer runs `alembic upgrade head --sql /tmp/out.sql`
 - **THEN** `/tmp/out.sql` contains `CREATE TABLE kline_1d`, `CREATE TABLE kline_1m`, `CREATE EXTENSION timescaledb`, and `SELECT create_hypertable('kline_1m', 'ts', ...)` statements
-
-### Requirement: Migration does not seed data
-
-The initial migration SHALL NOT insert any rows. Seeding (trade calendars, instrument lists) is performed by the `data-sources` capability through the `pump` helper, not by migrations.
-
-#### Scenario: No INSERT statements in the initial migration
-
-- **WHEN** a developer inspects `versions/0001_initial.py`
-- **THEN** no `op.execute("INSERT ...")` / `op.bulk_insert(...)` calls appear in the file
-
-### Requirement: Migrations live under the data package
-
-The `src/xtrade/data/migrations/` directory SHALL be importable / discoverable as Python so that `alembic` can find it via the configured `script_location`. No `migrations` directory SHALL exist at the repo root.
-
-#### Scenario: `script_location` points under src
-
-- **WHEN** a developer inspects `pyproject.toml`'s `[tool.alembic]` section (or the `alembic.ini` if used)
-- **THEN** the script location is `src/xtrade/data/migrations`
-

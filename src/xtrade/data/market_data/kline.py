@@ -107,6 +107,12 @@ class PostgresKLineRepository:
     Uses :func:`xtrade.data.engine.get_connection` to borrow a raw
     ``Connection``; no ORM Session is involved. Writes flush in chunks
     of ``Config.data.batch_size`` via ``cursor.copy`` (CSV format).
+
+    ``kline_1m`` is a TimescaleDB **hypertable** (see the ``0001_initial``
+    migration); TimescaleDB chunk pruning and compression are transparent
+    to this repository — the ``COPY`` + ``INSERT ... ON CONFLICT`` write
+    path and the time-range read path work identically against a
+    hypertable as against a regular Postgres table.
     """
 
     def __init__(self, batch_size: int) -> None:
@@ -215,10 +221,17 @@ class PostgresKLineRepository:
         stage_name: str,
         data_cols: list[str],
     ) -> None:
-        """Stream ``chunk`` into the staging temp table via ``COPY FROM STDIN``."""
+        """Stream ``chunk`` into the staging temp table via ``COPY FROM STDIN``.
+
+        Only the columns requested in ``data_cols`` are written to the CSV,
+        even if the input ``chunk`` has additional columns (e.g. ``interval``).
+        """
         buf = io.StringIO()
         writer = csv.writer(buf, lineterminator="\n")
-        for row in chunk.itertuples(index=False, name=None):
+        # Subset to data_cols so the CSV's column count matches the staging
+        # table's column count.
+        sub = chunk.loc[:, data_cols]
+        for row in sub.itertuples(index=False, name=None):
             # ``itertuples`` returns Python objects; normalise time and
             # decimals so psycopg's CSV reader accepts them.
             out: list[object] = []
@@ -232,11 +245,11 @@ class PostgresKLineRepository:
             writer.writerow(out)
         raw: Any = conn.connection.driver_connection  # psycopg.Connection
         col_list = ", ".join(data_cols)
-        with raw.cursor() as cursor:
-            cursor.copy_expert(
-                f"COPY {stage_name} ({col_list}) FROM STDIN WITH (FORMAT csv)",
-                io.StringIO(buf.getvalue()),
-            )
+        with (
+            raw.cursor() as cursor,
+            cursor.copy(f"COPY {stage_name} ({col_list}) FROM STDIN WITH (FORMAT csv)") as copy,
+        ):
+            copy.write(buf.getvalue())
 
     # ----- reads -----
 
