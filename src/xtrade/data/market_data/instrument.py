@@ -14,14 +14,26 @@ from xtrade.data.orm import InstrumentORM
 
 @dataclass(frozen=True)
 class Instrument:
-    """Plain dataclass exposed to callers (decoupled from ORM)."""
+    """Plain dataclass exposed to callers (decoupled from ORM).
+
+    Mirrors the columns stored in Postgres ``instrument`` (and the legacy
+    ``mos`` DuckDB reference dump, minus ``price_tick`` which is uniformly
+    ``0`` in the source). ``status`` uses the legacy single-letter codes
+    (``'L'`` for listed, ``'D'`` for delisted); the repository does NOT
+    remap.
+    """
 
     symbol: str
     name: str
     exchange: str
+    type: str
     list_date: date
     delist_date: date | None
     status: str
+    list_board: str | None = None
+    industry: str | None = None
+    area: str | None = None
+    is_t0: bool = False
 
 
 @runtime_checkable
@@ -38,9 +50,14 @@ def _to_record(row: InstrumentORM) -> Instrument:
         symbol=row.symbol,
         name=row.name,
         exchange=row.exchange,
+        type=row.type,
         list_date=row.list_date,
         delist_date=row.delist_date,
         status=row.status,
+        list_board=row.list_board,
+        industry=row.industry,
+        area=row.area,
+        is_t0=row.is_t0,
     )
 
 
@@ -60,17 +77,27 @@ class PostgresInstrumentRepository:
                     symbol=record.symbol,
                     name=record.name,
                     exchange=record.exchange,
+                    type=record.type,
                     list_date=record.list_date,
                     delist_date=record.delist_date,
                     status=record.status,
+                    list_board=record.list_board,
+                    industry=record.industry,
+                    area=record.area,
+                    is_t0=record.is_t0,
                 )
             )
         else:
             existing.name = record.name
             existing.exchange = record.exchange
+            existing.type = record.type
             existing.list_date = record.list_date
             existing.delist_date = record.delist_date
             existing.status = record.status
+            existing.list_board = record.list_board
+            existing.industry = record.industry
+            existing.area = record.area
+            existing.is_t0 = record.is_t0
 
     def get(self, symbol: str) -> Instrument | None:
         with get_session() as session:

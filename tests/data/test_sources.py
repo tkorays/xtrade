@@ -63,9 +63,10 @@ def test_in_memory_mock_source_instruments_defensive_copy() -> None:
         symbol="A",
         name="alpha",
         exchange="X",
+        type="Stock",
         list_date=date(2020, 1, 1),
         delist_date=None,
-        status="active",
+        status="L",
     )
     src = InMemoryMockSource(instruments=[inst])
     fetched = src.fetch_instruments()

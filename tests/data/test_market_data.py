@@ -341,9 +341,10 @@ def test_instrument_upsert_and_get(engine, schema) -> None:
         symbol="AAA",
         name="Alpha",
         exchange="XSHG",
+        type="Stock",
         list_date=date(2020, 1, 1),
         delist_date=None,
-        status="active",
+        status="L",
     )
     repo.upsert(record)
 
@@ -358,9 +359,10 @@ def test_pump_writes_source_into_repositories(engine, schema) -> None:
         symbol="AAA",
         name="Alpha",
         exchange="XSHG",
+        type="Stock",
         list_date=date(2020, 1, 1),
         delist_date=None,
-        status="active",
+        status="L",
     )
     source = InMemoryMockSource(
         instruments=[inst],

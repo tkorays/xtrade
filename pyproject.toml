@@ -40,6 +40,11 @@ dev = [
     "mypy>=1.10",
     "pre-commit>=3.8",
 ]
+# xtquant is NOT on PyPI; install from a local QMT distribution.
+# Example: ``uv pip install xtquant --find-links F:/QMT/python/Lib/site-packages``.
+xtquant = [
+    "xtquant",
+]
 
 [build-system]
 requires = ["hatchling"]

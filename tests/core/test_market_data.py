@@ -249,9 +249,10 @@ def test_get_instrument_returns_record(fake_instrument: _FakeInstrumentRepo) -> 
         symbol="AAA",
         name="Alpha",
         exchange="XSHG",
+        type="Stock",
         list_date=date(2020, 1, 1),
         delist_date=None,
-        status="active",
+        status="L",
     )
     fake_instrument.next_value = record
 

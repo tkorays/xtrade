@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import date
+
 import pytest
 
 from xtrade.data import create_engine
@@ -48,8 +50,9 @@ def test_get_session_commits_on_success(engine, schema) -> None:
                 symbol="AAA",
                 name="Alpha",
                 exchange="XSHG",
-                list_date=None,  # type: ignore[arg-type]
-                status="active",
+                type="Stock",
+                list_date=date(2020, 1, 1),
+                status="L",
             )
         )
 
@@ -73,8 +76,9 @@ def test_get_session_rolls_back_on_exception(engine, schema) -> None:
                 symbol="BBB",
                 name="Bravo",
                 exchange="XSHG",
-                list_date=None,  # type: ignore[arg-type]
-                status="active",
+                type="Stock",
+                list_date=date(2020, 1, 1),
+                status="L",
             )
         )
         raise _Boom

@@ -93,9 +93,7 @@ def upgrade() -> None:
         "  timescaledb.compress_orderby = 'ts'"
         ")"
     )
-    op.execute(
-        "SELECT add_compression_policy('kline_1m', INTERVAL '7 days')"
-    )
+    op.execute("SELECT add_compression_policy('kline_1m', INTERVAL '7 days')")
 
     op.create_table(
         "adjustment_factor",
@@ -123,13 +121,32 @@ def upgrade() -> None:
         sa.Column("symbol", sa.String(length=64), primary_key=True),
         sa.Column("name", sa.String(length=128), nullable=False),
         sa.Column("exchange", sa.String(length=16), nullable=False),
+        # ``type`` is NOT NULL with an empty-string server default so a
+        # legacy source row with NULL still imports cleanly.
+        sa.Column(
+            "type",
+            sa.String(length=16),
+            nullable=False,
+            server_default=sa.text("''"),
+        ),
         sa.Column("list_date", sa.Date(), nullable=False),
         sa.Column("delist_date", sa.Date(), nullable=True),
+        # ``status`` uses the legacy single-letter codes ('L' / 'D') and
+        # round-trips verbatim from the DuckDB reference dump.
         sa.Column(
             "status",
             sa.String(length=16),
             nullable=False,
-            server_default="active",
+            server_default="L",
+        ),
+        sa.Column("list_board", sa.String(length=32), nullable=True),
+        sa.Column("industry", sa.String(length=64), nullable=True),
+        sa.Column("area", sa.String(length=64), nullable=True),
+        sa.Column(
+            "is_t0",
+            sa.Boolean(),
+            nullable=False,
+            server_default=sa.text("false"),
         ),
     )
 

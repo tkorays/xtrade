@@ -25,6 +25,7 @@ from sqlalchemy import (
     Numeric,
     String,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -61,9 +62,7 @@ class KLine1mORM(Base):
     """
 
     __tablename__ = "kline_1m"
-    __table_args__ = (
-        UniqueConstraint("symbol", "ts", name="uq_kline_1m_symbol_ts"),
-    )
+    __table_args__ = (UniqueConstraint("symbol", "ts", name="uq_kline_1m_symbol_ts"),)
 
     symbol: Mapped[str] = mapped_column(String(64), primary_key=True)
     ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), primary_key=True)
@@ -100,16 +99,29 @@ class TradeCalendarORM(Base):
 
 
 class InstrumentORM(Base):
-    """Instrument / contract metadata (small reference table)."""
+    """Instrument / contract metadata (small reference table).
+
+    Mirrors the legacy ``mos`` DuckDB reference dump (``instrument_info``).
+    ``status`` uses the legacy single-letter codes (``'L'`` for listed,
+    ``'D'`` for delisted); the repository does NOT remap.
+    """
 
     __tablename__ = "instrument"
 
     symbol: Mapped[str] = mapped_column(String(64), primary_key=True)
     name: Mapped[str] = mapped_column(String(128), nullable=False)
     exchange: Mapped[str] = mapped_column(String(16), nullable=False)
+    # ``type`` is the legacy DuckDB column (e.g. ``'ETF'``, ``'LOF'``,
+    # ``'Stock'``); NOT NULL with a server-side empty-string fallback so
+    # future source dumps with NULL values still import cleanly.
+    type: Mapped[str] = mapped_column(String(16), nullable=False, server_default=text(""))
     list_date: Mapped[date] = mapped_column(Date, nullable=False)
     delist_date: Mapped[date | None] = mapped_column(Date, nullable=True)
-    status: Mapped[str] = mapped_column(String(16), nullable=False, default="active")
+    status: Mapped[str] = mapped_column(String(16), nullable=False, server_default="L")
+    list_board: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    industry: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    area: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    is_t0: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
 
 
 __all__ = [
