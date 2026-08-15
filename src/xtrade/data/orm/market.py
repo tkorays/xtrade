@@ -90,10 +90,17 @@ class AdjustmentFactorORM(Base):
 
 
 class TradeCalendarORM(Base):
-    """Trade calendar (one row per calendar date with ``is_trading`` flag)."""
+    """Trade calendar (one row per ``(exchange, date)`` with ``is_trading`` flag).
+
+    Per-exchange rows allow the underlying legacy dump to be ingested
+    losslessly; the repository collapses the per-exchange view with the
+    any-exchange rule (``is_trading_day`` returns ``True`` iff any
+    exchange marks the date as trading).
+    """
 
     __tablename__ = "trade_calendar"
 
+    exchange: Mapped[str] = mapped_column(String(16), primary_key=True)
     date: Mapped[date] = mapped_column(Date, primary_key=True)
     is_trading: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 

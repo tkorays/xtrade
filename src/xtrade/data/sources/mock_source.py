@@ -33,7 +33,7 @@ class InMemoryMockSource:
         self._calendar: pd.DataFrame = (
             calendar.copy()
             if calendar is not None
-            else pd.DataFrame(columns=["date", "is_trading"])
+            else pd.DataFrame(columns=["exchange", "date", "is_trading"])
         )
 
     # ---- fetch ----

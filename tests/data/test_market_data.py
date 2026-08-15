@@ -372,8 +372,8 @@ def test_pump_writes_source_into_repositories(engine, schema) -> None:
         },
         calendar=pd.DataFrame(
             [
-                {"date": date(2025, 1, 1), "is_trading": False},
-                {"date": date(2025, 1, 2), "is_trading": True},
+                {"exchange": "SH", "date": date(2025, 1, 1), "is_trading": False},
+                {"exchange": "SH", "date": date(2025, 1, 2), "is_trading": True},
             ]
         ),
     )

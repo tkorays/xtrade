@@ -1,9 +1,5 @@
-# Capability: data-market
+## MODIFIED Requirements
 
-## Purpose
-
-Provides durable storage for market reference data (bars, adjustment factors, trade calendar, instruments) with a DataFrame-shaped public interface and a strict two-path contract: high-throughput reads/writes for time-series data use native `Connection.cursor()` (`COPY` or `executemany` + `INSERT ... ON CONFLICT`); small reference tables use SQLAlchemy 2.x ORM. Adjustment (backward / forward) is computed on the read path from a discrete factor table, never stored pre-applied.
-## Requirements
 ### Requirement: Repository pattern for market data
 
 The data layer SHALL expose one `Protocol` per market-data entity (K-lines, adjustment factors, trade calendar, instruments) and a Postgres-backed implementation for each. Each protocol method SHALL be the only supported call site for downstream modules (broker, execution, strategy). Direct SQL or ORM access from outside the data package SHALL NOT be necessary to read or write market data.
@@ -83,63 +79,6 @@ The `trade_calendar` table SHALL store one row per `(exchange, date, is_trading)
 - **THEN** `d` SHALL appear exactly once in the returned list (the any-exchange rule), ascending, deduplicated
 - **AND** dates outside `[start, end]` SHALL NOT appear
 
-### Requirement: Two-path storage contract
-
-K-line, adjustment-factor, and trade-calendar repositories SHALL read and write via native `psycopg.Connection` operations (`pd.read_sql`, `cursor.copy`, `executemany` with `INSERT ... ON CONFLICT DO UPDATE`). They SHALL NOT use SQLAlchemy ORM unit-of-work semantics. Instrument repository MAY use ORM because its row count is small (thousands). All repositories SHALL share the same `Engine` from `data.engine.create_engine()`.
-
-#### Scenario: K-line write uses COPY or executemany
-
-- **WHEN** `KLineRepository.upsert_bars` is called with a 100 000-row DataFrame
-- **THEN** the implementation issues a small bounded number of SQL statements (at most `ceil(N / batch_size)`) and does not instantiate ORM `Session` objects
-
-#### Scenario: K-line read uses pandas, not Session
-
-- **WHEN** `KLineRepository.get_bars` returns a DataFrame
-- **THEN** the rows are read through `pandas.read_sql(...)` against the shared `Engine` (not via `session.execute(select(...))`)
-
-#### Scenario: Trade calendar write uses COPY or executemany
-
-- **WHEN** `TradeCalendarRepository.upsert_days(df)` is called with a year of trading days (~240 rows)
-- **THEN** the implementation uses native cursor + `INSERT ... ON CONFLICT DO NOTHING`, not the ORM
-
-#### Scenario: Instrument write uses ORM (allowed)
-
-- **WHEN** `InstrumentRepository.upsert(instrument)` is called for a small batch
-- **THEN** the implementation is allowed to use SQLAlchemy `Session` because instrument cardinality is small
-
-### Requirement: Adjustment factors are discrete, prices are raw
-
-The K-line tables SHALL store raw (un-adjusted) prices and SHALL NOT store a `pre_close` column. The adjustment-factor table SHALL store one row per dividend / split event with `[symbol, ex_date, factor]` and a cumulative factor per symbol per date SHALL be computed on the read path. No pre-applied `backward` or `forward` column SHALL exist in any K-line table.
-
-#### Scenario: Backward adjustment returns normalized series
-
-- **WHEN** a caller invokes `KLineRepository.get_bars(symbols, ..., interval="1d", adjust="backward")`
-- **THEN** the returned DataFrame's price columns are multiplied by the cumulative factor divided by the earliest factor in the window, so the first bar's `close` equals the raw first `close` * 1.0
-
-#### Scenario: Forward adjustment returns last-bar normalized series
-
-- **WHEN** a caller invokes `KLineRepository.get_bars(symbols, ..., interval="1m", adjust="forward")`
-- **THEN** the returned DataFrame's price columns are multiplied by the cumulative factor divided by the latest factor in the window, so the last bar's `close` equals the raw last `close`
-
-#### Scenario: `adjust="none"` does not apply factors
-
-- **WHEN** a caller invokes `KLineRepository.get_bars(symbols, ..., adjust="none")`
-- **THEN** the returned DataFrame's price columns equal the raw stored values, regardless of any adjustment factors in the database
-
-### Requirement: K-line interval is enumerated
-
-The K-line repository SHALL accept `interval` as a string enum restricted to `{"1d", "1m"}`. `interval="1d"` routes to table `kline_1d`; `interval="1m"` routes to table `kline_1m`. Unknown intervals SHALL raise `ValueError` before any database access.
-
-#### Scenario: Unknown interval rejected
-
-- **WHEN** a caller invokes any K-line method with `interval="5m"`
-- **THEN** the repository raises `ValueError("unsupported interval '5m'")` and does not touch the database
-
-#### Scenario: Routing uses the correct physical table
-
-- **WHEN** a caller invokes `KLineRepository.upsert_bars(df)` with `interval="1d"`
-- **THEN** the rows are written to `kline_1d` (verified by `SELECT count(*) FROM kline_1d` and `SELECT count(*) FROM kline_1m` reflecting the new rows only in the former)
-
 ### Requirement: Trade calendar exposes trading days and is-open predicate
 
 The trade calendar repository SHALL provide `is_trading_day(date)` and `get_trading_days(start, end)`. Trading days are stored as one row per `(exchange, date)` with `is_trading: bool` so non-trading days are explicitly recorded and per-exchange divergence is preserved. The two facade methods SHALL collapse the per-exchange view with the any-exchange rule (a date is "a trading day" iff any exchange marks it as such).
@@ -179,13 +118,3 @@ Re-applying the same DataFrame SHALL leave row counts unchanged and SHALL update
 
 - **WHEN** a caller calls `upsert_bars(df)` twice with identical rows for `interval="1m"`
 - **THEN** the row count in `kline_1m` does not double, and the second call's row count returned equals the first
-
-### Requirement: No external IO from market-data repositories
-
-Market-data repositories SHALL NOT make network calls. They read and write only the local PostgreSQL database. External data sources (Tushare, AKShare, CSV) are isolated behind the `DataSource` protocol in the `data-sources` capability; that capability owns the producer side that ultimately feeds these repositories.
-
-#### Scenario: K-line repository never imports a data-source client
-
-- **WHEN** a developer inspects the imports in `src/xtrade/data/market_data/kline.py`
-- **THEN** no module from `xtrade.data.sources` is imported
-

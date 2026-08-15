@@ -107,13 +107,15 @@ def upgrade() -> None:
 
     op.create_table(
         "trade_calendar",
-        sa.Column("date", sa.Date(), primary_key=True),
+        sa.Column("exchange", sa.String(length=16), nullable=False),
+        sa.Column("date", sa.Date(), nullable=False),
         sa.Column(
             "is_trading",
             sa.Boolean(),
             nullable=False,
             server_default=sa.text("true"),
         ),
+        sa.PrimaryKeyConstraint("exchange", "date", name="pk_trade_calendar_exchange_date"),
     )
 
     op.create_table(
