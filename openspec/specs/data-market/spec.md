@@ -12,6 +12,8 @@ K-lines SHALL be stored in two physical tables, one per supported frequency: `kl
 
 `kline_1d` SHALL be a regular Postgres table. `kline_1m` SHALL be a TimescaleDB **hypertable** with `chunk_time_interval = 1 day` and a compression policy that compresses chunks older than 7 days, segmentby `symbol`, orderedby `ts`. `kline_1m` SHALL NOT have a retention policy (data is kept indefinitely). The hypertable's row-level `INSERT ... ON CONFLICT (symbol, ts) DO UPDATE` semantics and SELECT-by-range semantics SHALL be identical to a regular Postgres table from the application's perspective.
 
+The `instrument` table SHALL store the full set of reference columns surfaced by the legacy `mos` reference dump: `symbol` (primary key), `name` (NOT NULL), `exchange` (NOT NULL), `type` (NOT NULL), `list_date` (NOT NULL), `delist_date` (nullable), `status` (NOT NULL, single-letter `L` for listed / `D` for delisted, default `L`), `list_board` (nullable), `industry` (nullable), `area` (nullable), and `is_t0` (NOT NULL BOOLEAN, default `false`). The corresponding `Instrument` dataclass SHALL expose every column except `symbol` so callers can filter by `industry` / `list_board` / `type` / `is_t0`. `status` SHALL NOT be remapped; values round-trip verbatim between the source dump and Postgres.
+
 #### Scenario: Caller asks for K-lines by symbols and time range
 
 - **WHEN** a caller invokes `KLineRepository.get_bars(symbols, start, end, interval, adjust="none")` with `interval` in `{"1d", "1m"}`
@@ -25,7 +27,20 @@ K-lines SHALL be stored in two physical tables, one per supported frequency: `kl
 #### Scenario: Caller looks up an instrument
 
 - **WHEN** a caller invokes `InstrumentRepository.get(symbol)`
-- **THEN** the repository returns an `Instrument` record (or `None` if not found) with `symbol`, `name`, `exchange`, `list_date`, `delist_date`, `status`
+- **THEN** the repository returns an `Instrument` record (or `None` if not found) with `symbol`, `name`, `exchange`, `type`, `list_date`, `delist_date`, `status`, `list_board`, `industry`, `area`, `is_t0`
+
+#### Scenario: Instrument `status` round-trips the legacy single-letter codes
+
+- **WHEN** a row is upserted with `status="L"` and then read back via `InstrumentRepository.get(symbol)`
+- **THEN** the returned record's `status` equals `"L"` exactly; the repository SHALL NOT translate `'L'` to any other value
+- **AND WHEN** a row is upserted with `status="D"` and then read back
+- **THEN** the returned record's `status` equals `"D"` exactly
+
+#### Scenario: Instrument upsert persists all reference columns
+
+- **WHEN** a caller invokes `InstrumentRepository.upsert(record)` with `record.type="ETF"`, `record.industry="金融"`, `record.area="上海"`, `record.is_t0=False`
+- **THEN** the row stored in Postgres `instrument` carries the same `type`, `industry`, `area`, `is_t0` values (verified by a subsequent `SELECT type, industry, area, is_t0 FROM instrument WHERE symbol = record.symbol`)
+- **AND** the subsequent `InstrumentRepository.get(record.symbol)` call returns an `Instrument` with identical `type`, `industry`, `area`, `is_t0` values
 
 #### Scenario: `kline_1m` is a hypertable with a 1-day chunk interval
 
