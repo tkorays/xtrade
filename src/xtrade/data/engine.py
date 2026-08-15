@@ -11,7 +11,7 @@ Why one engine with two facades:
 from __future__ import annotations
 
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from typing import Any
 
 from sqlalchemy import Engine
@@ -118,13 +118,27 @@ def get_connection() -> Iterator[Connection]:
     Use this when the time-series repos borrow a connection to run
     ``cursor.copy()`` / ``executemany`` / ``pd.read_sql``. The connection
     is committed on success / rolled back on exception.
+
+    Implementation note: SQLAlchemy's ``Connection.commit()`` does not
+    push a commit down to psycopg when the DML was issued via the raw
+    DBAPI cursor (``conn.connection.driver_connection``) instead of
+    ``Connection.exec_driver_sql`` / the ORM — psycopg3 keeps those
+    writes in its own implicit transaction that SQLAlchemy never
+    started. We therefore commit the driver connection explicitly
+    before SQLAlchemy commits, ensuring raw-cursor DML is durable.
     """
     engine = get_engine()
     conn = engine.connect()
+    raw_driver: Any = conn.connection.driver_connection
     try:
         yield conn
+        # Commit raw-cursor DML first (psycopg3 implicit transaction),
+        # then let SQLAlchemy commit anything it tracked itself.
+        raw_driver.commit()
         conn.commit()
     except Exception:
+        with suppress(Exception):
+            raw_driver.rollback()
         conn.rollback()
         raise
     finally:
