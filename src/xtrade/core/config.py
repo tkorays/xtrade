@@ -37,6 +37,56 @@ class PostgresConfig(BaseModel):
     database: str = "xtrade"
 
 
+class GrafanaConfig(BaseModel):
+    """Grafana connection configuration.
+
+    Supports two authentication modes:
+
+    * Basic auth via ``user`` + ``password`` (legacy Grafana ``admin`` user).
+    * Bearer token via ``api_key`` (Grafana Service Account token). When
+      ``api_key`` is set it takes precedence over basic auth credentials.
+
+    Use ``api_key`` for programmatic access to dashboards and panels; the
+    legacy ``admin``/``admin`` defaults are intentionally not used.
+    """
+
+    host: str = "localhost"
+    port: int = 3000
+    # URL scheme (``http`` or ``https``). ``https`` is recommended when
+    # Grafana is exposed outside of localhost.
+    scheme: str = "http"
+    # Optional Grafana path prefix (set when Grafana is served under a
+    # sub-path, e.g. ``"/grafana"``). Leave empty for the default root.
+    path_prefix: str = ""
+    # Basic-auth credentials. ``password`` has no default — supply via
+    # config file or the ``XTRADE_GRAFANA__PASSWORD`` env var.
+    user: str = "admin"
+    password: str = ""
+    # Bearer token for Service Account based auth. When non-empty it
+    # overrides basic auth in the HTTP layer.
+    api_key: str = ""
+    # Default organisation slug for the ``/api`` endpoints. Grafana's
+    # default org slug is ``"main"``; override for multi-org setups.
+    org_slug: str = "main"
+    # Grafana unified-API namespace for dashboards. Used as the path
+    # segment in ``/apis/dashboard.grafana.app/v1/namespaces/{namespace}/dashboards[...]``.
+    # Override via the ``XTRADE_GRAFANA__NAMESPACE`` env var.
+    namespace: str = "default"
+    # Default dashboard UID used by helpers that resolve dashboards by
+    # uid (panel lookups, dashboard provisioning, etc.).
+    default_dashboard_uid: str = ""
+    # HTTP request timeout in seconds for API calls.
+    timeout: float = 10.0
+    # When ``True``, verify TLS certificates for ``https`` requests.
+    verify_ssl: bool = True
+
+    @property
+    def base_url(self) -> str:
+        """Return the configured Grafana base URL with optional path prefix."""
+        prefix = self.path_prefix.rstrip("/")
+        return f"{self.scheme}://{self.host}:{self.port}{prefix}"
+
+
 class DataDatabaseConfig(BaseModel):
     """SQLAlchemy DSN for the data-layer database."""
 
@@ -71,6 +121,7 @@ class Config(BaseConfig):
 
     postgres: PostgresConfig = Field(default_factory=PostgresConfig)
     data: DataConfig = Field(default_factory=DataConfig)
+    grafana: GrafanaConfig = Field(default_factory=GrafanaConfig)
 
     @classmethod
     def settings_customise_sources(

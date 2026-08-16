@@ -27,6 +27,8 @@ dependencies = [
     "psycopg[binary]>=3.1",
     "alembic>=1.13",
     "pyarrow>=15",
+    "httpx>=0.27,<1.0",
+    "grafana-foundation-sdk>=0.0.18,<1.0",
 ]
 
 [project.scripts]
@@ -65,6 +67,10 @@ markers = [
 ]
 filterwarnings = [
     "error",
+    # grafana-foundation-sdk v0.0.18 deprecation warnings for v1 dashboard APIs.
+    # Tracked: switch to dashboardv2 when SDK stabilises v2.
+    "ignore::DeprecationWarning:grafana_foundation_sdk",
+    "ignore:datetime.datetime.utcnow.*:DeprecationWarning",
 ]
 
 # ---------------------------------------------------------------------------
