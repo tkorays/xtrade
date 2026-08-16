@@ -8,6 +8,8 @@ Two ORM namespaces:
       directly.
     - :mod:`xtrade.data.orm.broker`: order, trade, position, account.
       Always accessed via SQLAlchemy ``Session``.
+    - :mod:`xtrade.data.orm.sync_state`: data-collection watermark.
+      Accessed via SQLAlchemy ``Session`` (small reference table).
 """
 
 from xtrade.data.orm.broker import (
@@ -23,10 +25,12 @@ from xtrade.data.orm.market import (
     KLine1mORM,
     TradeCalendarORM,
 )
+from xtrade.data.orm.sync_state import DataSyncStateORM
 
 __all__ = [
     "AccountORM",
     "AdjustmentFactorORM",
+    "DataSyncStateORM",
     "InstrumentORM",
     "KLine1dORM",
     "KLine1mORM",

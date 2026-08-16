@@ -32,10 +32,11 @@ import sys
 import time
 from dataclasses import dataclass, field
 from datetime import date, datetime
-from datetime import time as dtime
 
-import pandas as pd
 from sqlalchemy import text
+
+from xtrade.data.sources.xtquant import SUPPORTED_INTERVALS, format_xtquant_time
+from xtrade.data.sources.xtquant import merge_bars as merge_xtquant_bars
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -44,83 +45,12 @@ from sqlalchemy import text
 DEFAULT_BATCH_SIZE: int = 50
 DEFAULT_LIMIT: int = 0  # 0 = unlimited
 
-SUPPORTED_INTERVALS: frozenset[str] = frozenset({"1d", "1m"})
-BEIJING_TZ: str = "Asia/Shanghai"
-
 logger = logging.getLogger("fetch_historical_bars_xtquant")
 
 
 # ---------------------------------------------------------------------------
 # Pure helpers (unit-testable without xtquant)
 # ---------------------------------------------------------------------------
-
-
-def merge_xtquant_bars(ret: dict[str, pd.DataFrame | None], interval: str) -> pd.DataFrame:
-    """Merge ``xtdata.get_local_data``'s per-symbol output into one DataFrame.
-
-    - Drops any ``pre_close`` column.
-    - Renames ``preClose`` → ``pre_close`` defensively (then drops it).
-    - Converts ``time`` (ms-UTC int64) to Asia/Shanghai ``Timestamp`` and then
-      either ``.dt.date`` (for ``1d``) or kept tz-aware (for ``1m``).
-    - Adds the ``interval`` column.
-    - Sorts by ``(symbol, time_col)``.
-
-    Skips ``None`` / empty frames silently. Returns an empty DataFrame if
-    every frame is empty.
-    """
-    if interval not in SUPPORTED_INTERVALS:
-        raise ValueError(f"unsupported interval {interval!r}")
-
-    time_col = "date" if interval == "1d" else "time"
-    frames: list[pd.DataFrame] = []
-
-    for symbol, df in ret.items():
-        if df is None or df.empty:
-            continue
-        df = df.copy()
-
-        # xtdata returns ``preClose`` (camelCase). Normalise defensively then
-        # drop it; the new schema does not store ``pre_close``.
-        if "preClose" in df.columns and "pre_close" not in df.columns:
-            df = df.rename(columns={"preClose": "pre_close"})
-        if "pre_close" in df.columns:
-            df = df.drop(columns=["pre_close"])
-
-        # xtdata returns ``time`` as int64 ms since UTC epoch, representing
-        # Beijing 00:00 of the requested date. Parse as UTC then convert to
-        # Asia/Shanghai to avoid a one-day offset.
-        if interval == "1d":
-            df[time_col] = (
-                pd.to_datetime(df["time"], unit="ms", utc=True).dt.tz_convert(BEIJING_TZ).dt.date
-            )
-        else:
-            df[time_col] = pd.to_datetime(df["time"], unit="ms", utc=True).dt.tz_convert(BEIJING_TZ)
-
-        df["symbol"] = symbol
-        df["interval"] = interval
-
-        df = df[
-            ["symbol", time_col, "interval", "open", "high", "low", "close", "volume", "amount"]
-        ].rename(columns={time_col: "time"})
-        frames.append(df)
-
-    if not frames:
-        return pd.DataFrame(
-            columns=[
-                "symbol",
-                "time",
-                "interval",
-                "open",
-                "high",
-                "low",
-                "close",
-                "volume",
-                "amount",
-            ]
-        )
-
-    result = pd.concat(frames, ignore_index=True)
-    return result.sort_values(["symbol", "time"]).reset_index(drop=True)
 
 
 def list_instrument_symbols(limit: int | None = None) -> list[str]:
@@ -141,18 +71,6 @@ def list_instrument_symbols(limit: int | None = None) -> list[str]:
     with get_engine().connect() as conn:
         rows = conn.execute(text(query)).fetchall()
     return [row[0] for row in rows]
-
-
-def format_xtquant_time(d: date, interval: str, *, end: bool = False) -> str:
-    """Format a ``date`` for ``xtdata.download_history_data2``.
-
-    - 1d: ``YYYYMMDD``.
-    - 1m: ``YYYYMMDDHHmmss`` (``time.min`` for start, ``time.max`` for end).
-    """
-    if interval == "1d":
-        return d.strftime("%Y%m%d")
-    base = datetime.combine(d, dtime.max if end else dtime.min)
-    return base.strftime("%Y%m%d%H%M%S")
 
 
 # ---------------------------------------------------------------------------

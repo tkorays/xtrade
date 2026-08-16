@@ -56,6 +56,18 @@ class SourceRegistry:
 
         self._sources["mock"] = InMemoryMockSource()
 
+        # ``xtquant`` ships with the user's QMT distribution (not on PyPI).
+        # Register it lazily so the rest of the project loads cleanly when
+        # the package is missing. A failed import is silently skipped;
+        # callers see the absence as ``KeyError`` from :meth:`get`.
+        try:
+            from xtrade.data.sources.xtquant import XtQuantDataSource
+
+            self._sources["xtquant"] = XtQuantDataSource()
+        except ModuleNotFoundError:
+            # xtquant is optional — the operator installs it locally.
+            pass
+
     def register(self, name: str, source: DataSource) -> None:
         if not isinstance(source, DataSource):
             # ``runtime_checkable`` only checks method presence, not
@@ -75,8 +87,16 @@ class SourceRegistry:
         return sorted(self._sources)
 
     def reset(self) -> None:
-        """Drop all registered sources (used by tests)."""
+        """Drop all registered sources and re-seed the defaults (used by tests).
+
+        Calling ``reset`` mirrors the state the registry has on first
+        instantiation: the ``mock`` source is always re-registered, and
+        ``xtquant`` is re-registered when its optional import succeeds.
+        Tests that depend on a known starting point should call this
+        between cases.
+        """
         self._sources.clear()
+        self._init()
 
     def __contains__(self, name: str) -> bool:
         return name in self._sources

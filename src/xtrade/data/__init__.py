@@ -21,9 +21,19 @@ from xtrade.data.engine import (
     get_session,
     reset_engine,
 )
+from xtrade.data.market_data import (
+    Instrument,
+    InstrumentRepository,
+    KLineRepository,
+    PostgresInstrumentRepository,
+    PostgresKLineRepository,
+    PostgresTradeCalendarRepository,
+    TradeCalendarRepository,
+)
 from xtrade.data.orm import (
     AccountORM,
     AdjustmentFactorORM,
+    DataSyncStateORM,
     InstrumentORM,
     KLine1dORM,
     KLine1mORM,
@@ -33,18 +43,34 @@ from xtrade.data.orm import (
     TradeORM,
 )
 from xtrade.data.orm_base import Base, TimestampMixin
+from xtrade.data.sync_state import (
+    DataSyncState,
+    DataSyncStateRepository,
+    PostgresDataSyncStateRepository,
+)
 
 __all__ = [
     "AccountORM",
     "AdjustmentFactorORM",
     "Base",
+    "DataSyncState",
+    "DataSyncStateORM",
+    "DataSyncStateRepository",
+    "Instrument",
     "InstrumentORM",
+    "InstrumentRepository",
     "KLine1dORM",
     "KLine1mORM",
+    "KLineRepository",
     "OrderORM",
     "PositionORM",
+    "PostgresDataSyncStateRepository",
+    "PostgresInstrumentRepository",
+    "PostgresKLineRepository",
+    "PostgresTradeCalendarRepository",
     "TimestampMixin",
     "TradeCalendarORM",
+    "TradeCalendarRepository",
     "TradeORM",
     "create_engine",
     "get_connection",

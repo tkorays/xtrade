@@ -14,6 +14,7 @@ import click
 from xtrade import __version__ as _pkg_version
 from xtrade.cli.backtest import backtest as backtest_cmd
 from xtrade.cli.config import config as config_cmd
+from xtrade.cli.data import data as data_cmd
 from xtrade.core.logging import setup_logging
 
 
@@ -36,7 +37,7 @@ def cli() -> None:
 
 cli.add_command(config_cmd)
 cli.add_command(backtest_cmd)
-
+cli.add_command(data_cmd)
 
 if __name__ == "__main__":
     cli()
