@@ -46,9 +46,9 @@
 
 ## 7. Validation
 
-- [ ] 7.1 `uv run pytest tests/core/test_grafana_builder.py tests/core/test_grafana_client.py tests/test_config.py -q` passes (new + existing tests stay green).
-- [ ] 7.2 `uv run pytest -q` passes (full suite, no regressions).
-- [ ] 7.3 `uv run ruff check src tests` clean.
-- [ ] 7.4 `uv run ruff format --check src tests` clean.
-- [ ] 7.5 `uv run mypy src` strict mode clean.
-- [ ] 7.6 `openspec validate --all --strict` clean (this change + the two previous Grafana changes still validate).
+- [x] 7.1 `uv run pytest tests/core/test_grafana_builder.py tests/core/test_grafana_client.py tests/test_config.py -q` passes (new + existing tests stay green).
+- [x] 7.2 `uv run pytest -q` passes (full suite, no regressions).
+- [x] 7.3 `uv run ruff check src tests` clean.
+- [x] 7.4 `uv run ruff format --check src tests` clean.
+- [x] 7.5 `uv run mypy src` strict mode clean.
+- [x] 7.6 `openspec validate --all --strict` clean (this change + the two previous Grafana changes still validate).
