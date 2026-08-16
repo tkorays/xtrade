@@ -160,6 +160,12 @@ class XtQuantDataSource:
     def fetch_bars(self, symbol: str, start: date, end: date, interval: str) -> pd.DataFrame:
         """Fetch one symbol's bars in ``[start, end]`` and normalise them.
 
+        Thin wrapper around :meth:`fetch_bars_bulk` kept for callers that
+        ask for one symbol at a time (e.g.
+        ``scripts/fetch_historical_bars_xtquant.py``). New code paths
+        SHOULD use :meth:`fetch_bars_bulk` directly to amortise the
+        MiniQMT round-trips.
+
         Args:
             symbol: A single symbol (e.g. ``"000001.SZ"``).
             start: Inclusive start date.
@@ -169,10 +175,45 @@ class XtQuantDataSource:
         Returns:
             A normalised per-symbol DataFrame, or an empty DataFrame when
             xtquant returns no data for the requested window.
+        """
+        merged = self.fetch_bars_bulk([symbol], start, end, interval)
+        if merged.empty:
+            return pd.DataFrame(
+                columns=["time", "open", "high", "low", "close", "volume", "amount"]
+            )
+        return (
+            merged.loc[merged["symbol"] == symbol].drop(columns=["symbol"]).reset_index(drop=True)
+        )
+
+    def fetch_bars_bulk(
+        self, symbols: list[str], start: date, end: date, interval: str
+    ) -> pd.DataFrame:
+        """Fetch many symbols' bars in one bulk call.
+
+        Issues a single ``download_history_data2(stock_list=symbols, ...)``
+        followed by a single ``get_local_data(stock_list=symbols, ...)``
+        against MiniQMT, then merges the per-symbol frames into one
+        long-format DataFrame with columns ``symbol, time, interval,
+        open, high, low, close, volume, amount`` (sorted by
+        ``(symbol, time)``). Symbols absent from MiniQMT's cache are
+        omitted from the result; the caller SHALL treat absence as
+        "no data in window".
+
+        Args:
+            symbols: Symbols to fetch. May be a single-element list.
+            start: Inclusive start date.
+            end: Inclusive end date.
+            interval: One of ``"1d"``, ``"1m"``.
+
+        Returns:
+            A long-format DataFrame. Empty (with canonical columns) when
+            every symbol returned nothing.
 
         Raises:
             ValueError: If ``interval`` is not in ``SUPPORTED_INTERVALS``.
             ModuleNotFoundError: If ``xtquant`` is not installed.
+            Exception: Any MiniQMT exception from ``download_history_data2``
+                or ``get_local_data`` is propagated as-is.
         """
         if interval not in SUPPORTED_INTERVALS:
             raise ValueError(
@@ -182,44 +223,47 @@ class XtQuantDataSource:
         # Lazy import — xtquant is not on PyPI; surface a clear
         # ``ModuleNotFoundError`` on first call rather than failing at
         # import time.
-        from xtquant import xtdata  # type: ignore[import-not-found]
+        from xtquant import xtdata  # type: ignore[import-untyped]
 
         start_str = format_xtquant_time(start, interval, end=False)
         end_str = format_xtquant_time(end, interval, end=True)
 
-        # ``download_history_data2`` populates MiniQMT's local cache.
-        # Errors here are surfaced as-is so the collector can record them.
+        # One bulk ``download_history_data2`` for the whole list. MiniQMT
+        # fans the request out internally so this single call replaces
+        # the N per-symbol calls the legacy implementation issued.
         xtdata.download_history_data2(
-            stock_list=[symbol],
+            stock_list=symbols,
             period=interval,
             start_time=start_str,
             end_time=end_str,
         )
 
         ret = xtdata.get_local_data(
-            stock_list=[symbol],
+            stock_list=symbols,
             period=interval,
             start_time=start_str,
             end_time=end_str,
             dividend_type="none",
         )
 
-        # xtquant returns ``None`` for symbols with no cached data.
+        # xtquant returns ``None`` for an empty list / unknown symbols.
         if not ret:
-            return pd.DataFrame()
+            return pd.DataFrame(
+                columns=[
+                    "symbol",
+                    "time",
+                    "interval",
+                    "open",
+                    "high",
+                    "low",
+                    "close",
+                    "volume",
+                    "amount",
+                ]
+            )
 
-        per_symbol = cast("dict[str, pd.DataFrame]", ret)
-        frame = per_symbol.get(symbol)
-        if frame is None or frame.empty:
-            return pd.DataFrame()
-
-        merged = merge_bars({symbol: frame}, interval)
-        # ``merge_bars`` returns a per-symbol frame because we passed a
-        # single key; drop the ``symbol`` column to honour the
-        # ``DataSource`` Protocol's per-symbol contract.
-        if "symbol" in merged.columns:
-            merged = merged.drop(columns=["symbol"])
-        return merged
+        per_symbol = cast("dict[str, pd.DataFrame | None]", ret)
+        return merge_bars(per_symbol, interval)
 
     def fetch_adjust_factors(self, symbol: str, start: date, end: date) -> pd.DataFrame:
         """Return an empty DataFrame — out of scope for this change."""

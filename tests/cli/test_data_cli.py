@@ -108,6 +108,7 @@ def test_data_sync_help(runner: CliRunner) -> None:
     assert result.exit_code == 0, result.stderr
     assert "--interval" in result.stdout
     assert "--batch-size" in result.stdout
+    assert "--batch-size-max" in result.stdout
     assert "--lookback-days" in result.stdout
     assert "--dry-run" in result.stdout
     assert "--start-date" in result.stdout
@@ -130,6 +131,110 @@ def test_sync_rejects_unknown_interval(runner: CliRunner) -> None:
     result = runner.invoke(cli, ["data", "sync", "--interval", "5m"])
     assert result.exit_code != 0
     assert "5m" in result.stderr or "Invalid value" in result.stderr
+
+
+def test_sync_rejects_batch_size_above_max(runner: CliRunner) -> None:
+    result = runner.invoke(
+        cli,
+        [
+            "data",
+            "sync",
+            "--interval",
+            "1d",
+            "--batch-size",
+            "1000",
+            "--batch-size-max",
+            "500",
+            "--dry-run",
+        ],
+    )
+    assert result.exit_code != 0
+    assert "--batch-size" in result.stderr
+    assert "500" in result.stderr
+
+
+def test_sync_1d_default_has_no_batch_size_max(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The 1d default ``--batch-size-max`` is ``None`` (no cap), so
+    ``batch_size=len(instruments)`` is accepted without rejection."""
+    # Stub the instrument repo so the run does not require a real DB.
+    # We only need a list of symbols; any object with a ``symbol`` attr
+    # works because the collector only reads ``i.symbol``.
+    from xtrade.cli import data as data_cli
+
+    @dataclass(frozen=True)
+    class _FakeInstr:
+        symbol: str
+
+    class _StubInstrumentRepo:
+        def list_all(self) -> list[_FakeInstr]:
+            return [_FakeInstr(symbol=f"S{i:05d}") for i in range(7000)]
+
+        def upsert(self, record: object) -> None:  # pragma: no cover
+            pass
+
+        def get(self, symbol: str) -> _FakeInstr | None:  # pragma: no cover
+            return None
+
+    monkeypatch.setattr(data_cli, "_build_instrument_repo", _StubInstrumentRepo)
+
+    # Use ``--dry-run`` so we exit before any xtquant / DB IO. If the
+    # ``batch_size_max`` cap were still 500, this would reject 7073.
+    result = runner.invoke(
+        cli,
+        [
+            "data",
+            "sync",
+            "--interval",
+            "1d",
+            "--start-date",
+            "2024-01-01",
+            "--end-date",
+            "2024-01-31",
+            "--dry-run",
+        ],
+    )
+    assert result.exit_code == 0, result.stderr
+
+
+def test_sync_1m_default_still_caps_at_500(runner: CliRunner) -> None:
+    """1m keeps the 500 safety valve."""
+    result = runner.invoke(
+        cli,
+        [
+            "data",
+            "sync",
+            "--interval",
+            "1m",
+            "--batch-size",
+            "1000",
+            "--dry-run",
+        ],
+    )
+    assert result.exit_code != 0
+    assert "--batch-size" in result.stderr
+    assert "500" in result.stderr
+
+
+def test_sync_1d_explicit_batch_size_max_still_honoured(runner: CliRunner) -> None:
+    """Explicit ``--batch-size-max`` is honoured for 1d too."""
+    result = runner.invoke(
+        cli,
+        [
+            "data",
+            "sync",
+            "--interval",
+            "1d",
+            "--batch-size",
+            "600",
+            "--batch-size-max",
+            "500",
+            "--dry-run",
+        ],
+    )
+    assert result.exit_code != 0
+    assert "500" in result.stderr
 
 
 def test_reset_rejects_unknown_interval(runner: CliRunner) -> None:

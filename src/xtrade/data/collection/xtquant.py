@@ -69,12 +69,22 @@ VERBOSE_SYMBOL_PROGRESS_FORMAT: str = (
     "{symbol_index}/{symbols_total}  sym={symbol}  interval={interval}"
 )
 
+# Bulk-batch DEBUG progress line. With ``xtquant-bulk-fetch`` the fetch
+# unit is the batch rather than the symbol, so the per-symbol format
+# above is replaced by this one. Same convention: emitted only when the
+# collector logger accepts DEBUG records.
+VERBOSE_BULK_PROGRESS_FORMAT: str = (
+    "{symbol_index}/{symbols_total}  bulk-fetch: syms={batch_size} "
+    "interval={interval} first={first_symbol} last={last_symbol}"
+)
+
 __all__ = [
     "DEFAULT_BATCH_SIZE",
     "DEFAULT_LOOKBACK_DAYS",
     "MAX_LOOKBACK_DAYS",
     "SLOW_FETCH_SECONDS",
     "SLOW_UPSERT_SECONDS",
+    "VERBOSE_BULK_PROGRESS_FORMAT",
     "VERBOSE_SYMBOL_PROGRESS_FORMAT",
     "DailyXtQuantCollector",
     "SyncReport",
@@ -462,16 +472,22 @@ class DailyXtQuantCollector:
         symbol_offset: int = 0,
         symbols_total: int = 0,
     ) -> tuple[int, list[tuple[str, str]], date | None, float, float]:
-        """Fetch one batch via the source and upsert via the repository.
+        """Fetch one batch via the source (bulk) and upsert via the repository.
 
         Returns ``(rows_written, skipped_symbols, latest_trade_date,
-        cumulative_fetch_seconds, upsert_seconds)``. ``upsert_seconds``
-        is ``0.0`` when the batch wrote nothing.
+        fetch_seconds, upsert_seconds)``. ``upsert_seconds`` is ``0.0``
+        when the batch wrote nothing.
 
-        Per-symbol exceptions are caught and returned as skipped
-        records; they do NOT abort the batch. Each ``fetch_bars`` call
-        is timed; a single call exceeding
-        :attr:`_slow_fetch_seconds` triggers a ``WARNING``.
+        Bulk-fetch contract:
+
+        - One ``source.fetch_bars_bulk(batch, ...)`` call replaces N
+          per-symbol calls. If it raises, we retry **once**; on second
+          failure every symbol in ``batch`` is recorded as skipped and
+          the run continues.
+        - When the bulk fetch succeeds but returns rows for a subset of
+          the symbols (some symbols had all-NaN rows), each missing
+          symbol is recorded as skipped with reason
+          ``xtquant returned empty frame for this symbol``.
 
         Args:
             batch: Symbols to process in this batch.
@@ -479,62 +495,108 @@ class DailyXtQuantCollector:
             end: Window end (inclusive).
             interval: ``"1d"`` or ``"1m"``.
             symbol_offset: 0-based run-wide index of the first symbol
-                in ``batch``. Used by the per-symbol DEBUG line.
+                in ``batch``. Used by the bulk DEBUG line.
             symbols_total: Total symbols in the run; ``0`` disables the
                 DEBUG line (used by tests that don't care about it).
         """
-        per_symbol_frames: list[pd.DataFrame] = []
         skipped: list[tuple[str, str]] = []
-        latest: date | None = None
-        fetch_seconds = 0.0
 
-        for idx, symbol in enumerate(batch):
-            if symbols_total > 0:
-                logger.debug(
-                    VERBOSE_SYMBOL_PROGRESS_FORMAT.format(
-                        symbol_index=symbol_offset + idx + 1,
-                        symbols_total=symbols_total,
-                        symbol=symbol,
-                        interval=interval,
-                    )
+        # Emit one DEBUG line for the whole batch under ``--verbose``.
+        if symbols_total > 0 and batch:
+            logger.debug(
+                VERBOSE_BULK_PROGRESS_FORMAT.format(
+                    symbol_index=symbol_offset + 1,
+                    symbols_total=symbols_total,
+                    batch_size=len(batch),
+                    interval=interval,
+                    first_symbol=batch[0],
+                    last_symbol=batch[-1],
                 )
+            )
+
+        # Whole-batch fetch with one retry. Track fetch time around the
+        # *first* successful call (the retry, when it happens, is
+        # attributed to the same elapsed bucket because both calls
+        # serve the same batch).
+        fetch_seconds = 0.0
+        merged: pd.DataFrame | None = None
+        last_exc: Exception | None = None
+        for _ in range(2):
             t0 = time.perf_counter()
             try:
-                df = self._source.fetch_bars(symbol, start, end, interval)
+                merged = self._source.fetch_bars_bulk(batch, start, end, interval)
+                fetch_seconds += time.perf_counter() - t0
+                last_exc = None
+                break
             except Exception as exc:
-                elapsed = time.perf_counter() - t0
-                fetch_seconds += elapsed
-                if elapsed >= self._slow_fetch_seconds:
-                    logger.warning(
-                        "slow fetch: symbol=%s elapsed=%.2fs (threshold=%.2fs)",
-                        symbol,
-                        elapsed,
-                        self._slow_fetch_seconds,
-                    )
-                skipped.append((symbol, f"{type(exc).__name__}: {exc}"))
-                continue
-            elapsed = time.perf_counter() - t0
-            fetch_seconds += elapsed
-            if elapsed >= self._slow_fetch_seconds:
+                fetch_seconds += time.perf_counter() - t0
+                last_exc = exc
+                # Loop and retry once; on the second failure we fall
+                # through to the "skip entire batch" branch.
+        if last_exc is not None or merged is None:
+            msg = (
+                f"{type(last_exc).__name__}: {last_exc}"
+                if last_exc is not None
+                else "bulk fetch returned None"
+            )
+            for symbol in batch:
+                skipped.append((symbol, msg))
+            if fetch_seconds >= self._slow_fetch_seconds:
                 logger.warning(
-                    "slow fetch: symbol=%s elapsed=%.2fs (threshold=%.2fs)",
-                    symbol,
-                    elapsed,
+                    "slow fetch: batch_size=%d elapsed=%.2fs (threshold=%.2fs)",
+                    len(batch),
+                    fetch_seconds,
                     self._slow_fetch_seconds,
                 )
-            if df is None or df.empty:
-                # xtquant returned nothing for this symbol; treat as
-                # "no data in window", not an error.
-                continue
-            df = df.copy()
-            df["symbol"] = symbol
-            df["interval"] = interval
-            per_symbol_frames.append(df)
-
-        if not per_symbol_frames:
             return 0, skipped, None, fetch_seconds, 0.0
 
-        merged = pd.concat(per_symbol_frames, ignore_index=True)
+        if fetch_seconds >= self._slow_fetch_seconds:
+            logger.warning(
+                "slow fetch: batch_size=%d elapsed=%.2fs (threshold=%.2fs)",
+                len(batch),
+                fetch_seconds,
+                self._slow_fetch_seconds,
+            )
+
+        # xtquant may return rows whose OHLC are all NaN (delisted,
+        # suspended, or with no history in window). Those rows violate
+        # the ``NOT NULL`` constraints on ``kline_*`` columns and must
+        # be dropped before ``upsert_bars``. We classify each symbol as
+        # ``all_nan`` (every row is NaN — xtquant gave us nothing
+        # usable, recorded as skipped) or ``partial`` (some rows are
+        # valid, some are NaN — keep the valid rows, drop the NaN
+        # ones silently). Symbols with zero rows (xtquant didn't even
+        # return a frame for them) are handled by the ``returned_symbols``
+        # block below.
+        price_cols = ["open", "high", "low", "close"]
+        row_all_nan_mask = merged[price_cols].isna().all(axis=1)
+        all_nan_symbols: set[str] = set()
+        if row_all_nan_mask.any():
+            # A symbol is "fully NaN" iff EVERY one of its rows is all-NaN.
+            fully_nan_rows = merged.loc[row_all_nan_mask, "symbol"].unique()
+            for symbol in fully_nan_rows:
+                sym_rows = merged.loc[merged["symbol"] == symbol]
+                if sym_rows[price_cols].isna().all(axis=1).all():
+                    all_nan_symbols.add(symbol)
+            for symbol in all_nan_symbols:
+                skipped.append((symbol, "xtquant returned rows with all NaN OHLC for this symbol"))
+            # Drop ALL all-NaN rows (including from partial symbols —
+            # we only keep the NaN-free rows of partial symbols).
+            merged = merged.loc[~row_all_nan_mask].reset_index(drop=True)
+            if merged.empty:
+                return 0, skipped, None, fetch_seconds, 0.0
+
+        # Symbols absent from the merged frame entirely (xtquant
+        # didn't even return a row). Cover the residual: any symbol
+        # in the batch that produced zero usable rows.
+        returned_symbols = set(merged["symbol"].unique())
+        for symbol in batch:
+            if symbol not in returned_symbols and symbol not in all_nan_symbols:
+                skipped.append((symbol, "xtquant returned empty frame for this symbol"))
+
+        if merged.empty:
+            return 0, skipped, None, fetch_seconds, 0.0
+
         # ``upsert_bars`` requires the columns in
         # ``KLINE_REQUIRED_COLUMNS``; the column order does not matter
         # but ``time`` must be present.
@@ -553,14 +615,8 @@ class DailyXtQuantCollector:
         # ``time`` is ``datetime.date``; for ``1m`` it's a tz-aware
         # ``Timestamp``.
         ts_series = pd.to_datetime(merged["time"], utc=True)
-        if interval == "1d":
-            batch_latest: date | None = ts_series.max().date()
-        else:
-            batch_latest = ts_series.max().date()
-        if batch_latest is not None and (latest is None or batch_latest > latest):
-            latest = batch_latest
-
-        return rows, skipped, latest, fetch_seconds, upsert_seconds
+        batch_latest: date | None = ts_series.max().date()
+        return rows, skipped, batch_latest, fetch_seconds, upsert_seconds
 
 
 # ---------------------------------------------------------------------------

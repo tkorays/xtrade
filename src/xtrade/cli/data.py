@@ -37,9 +37,16 @@ from xtrade.data.collection.xtquant import (
     DailyXtQuantCollector,
     SyncReport,
 )
-from xtrade.data.sources.base import SourceRegistry
 from xtrade.data.engine import get_engine
+from xtrade.data.sources.base import SourceRegistry
 from xtrade.data.sources.xtquant import SUPPORTED_INTERVALS
+
+# Upper bounds for ``--batch-size``. The cap matters for ``1m`` where
+# the wide frame from ``xtquant.get_market_data_ex`` can blow up memory;
+# ``1d`` wide frames are ~200MB at 7000 symbols x 10 years, well below
+# operator hardware budgets, so the ``1d`` default is ``None`` (no cap).
+BATCH_SIZE_MAX_DEFAULT_1D: int | None = None
+BATCH_SIZE_MAX_DEFAULT_1M: int = 500
 
 __all__ = ["data"]
 
@@ -87,6 +94,27 @@ def data() -> None:
 # ---------------------------------------------------------------------------
 
 
+def _default_batch_size_max(
+    ctx: click.Context, param: click.Parameter, value: int | None
+) -> int | None:
+    """Per-interval default for ``--batch-size-max``.
+
+    Click resolves options in declaration order; ``--interval`` is the
+    first option after ``sync_cmd``, so its value is already in
+    ``ctx.params`` when this callback runs. We return the per-interval
+    default unless the operator explicitly passed a value.
+    """
+    if value is not None:
+        return value
+    interval = ctx.params.get("interval")
+    if interval == "1d":
+        return BATCH_SIZE_MAX_DEFAULT_1D
+    if interval == "1m":
+        return BATCH_SIZE_MAX_DEFAULT_1M
+    # Unknown interval (Click has already rejected it, but be defensive).
+    return None
+
+
 @data.command("sync")
 @click.option(
     "--interval",
@@ -97,9 +125,24 @@ def data() -> None:
 @click.option(
     "--batch-size",
     type=int,
-    default=DEFAULT_BATCH_SIZE,
-    show_default=True,
-    help="Symbols per fetch_bars loop chunk.",
+    default=None,
+    help=(
+        "Symbols per bulk fetch_bars call. Default depends on --interval: "
+        "1d → len(instruments) (whole market); 1m → 50. Use --batch-size "
+        "to override. Must be <= --batch-size-max."
+    ),
+)
+@click.option(
+    "--batch-size-max",
+    type=int,
+    default=None,
+    show_default=False,
+    callback=_default_batch_size_max,
+    help=(
+        "Upper bound for --batch-size. Values above it are rejected "
+        "before any IO. Default depends on --interval: 1d → no cap; "
+        "1m → 500. Pass an explicit value to override."
+    ),
 )
 @click.option(
     "--lookback-days",
@@ -144,13 +187,15 @@ def data() -> None:
     is_flag=True,
     default=False,
     help=(
-        "Lower the collector logger to DEBUG; emit one line per symbol "
-        "fetch on stderr. Use this when debugging a stuck or slow run."
+        "Lower the collector logger to DEBUG; emit one bulk-fetch "
+        "DEBUG line per batch on stderr. Use this when debugging a "
+        "stuck or slow run."
     ),
 )
 def sync_cmd(
     interval: str,
-    batch_size: int,
+    batch_size: int | None,
+    batch_size_max: int | None,
     lookback_days: int,
     dry_run: bool,
     start_date: datetime | None,
@@ -176,8 +221,10 @@ def sync_cmd(
         raise click.ClickException(
             f"--lookback-days must be <= {MAX_LOOKBACK_DAYS}; got {lookback_days}"
         )
-    if batch_size < 1:
+    if batch_size is not None and batch_size < 1:
         raise click.ClickException(f"--batch-size must be >= 1; got {batch_size}")
+    if batch_size_max is not None and batch_size_max < 1:
+        raise click.ClickException(f"--batch-size-max must be >= 1; got {batch_size_max}")
 
     # Coerce Click's datetime → date and validate the closed range.
     start_d: date | None = start_date.date() if start_date is not None else None
@@ -200,6 +247,7 @@ def sync_cmd(
         report = _run_sync(
             interval=interval,
             batch_size=batch_size,
+            batch_size_max=batch_size_max,
             lookback_days=lookback_days,
             dry_run=dry_run,
             start_date=start_d,
@@ -236,7 +284,8 @@ def sync_cmd(
 def _run_sync(
     *,
     interval: str,
-    batch_size: int,
+    batch_size: int | None,
+    batch_size_max: int | None,
     lookback_days: int,
     dry_run: bool,
     start_date: date | None,
@@ -257,9 +306,29 @@ def _run_sync(
             f"Known sources: {SourceRegistry().names()}"
         ) from exc
 
+    # Resolve ``batch_size`` from the per-interval default when the
+    # operator did not pass one. We have to count instruments first;
+    # this is a cheap indexed ``SELECT COUNT(*)``.
+    instrument_repo = _build_instrument_repo()
+    if batch_size is None:
+        symbols_count = sum(1 for _ in instrument_repo.list_all())
+        if interval == "1d":
+            batch_size = symbols_count
+        elif interval == "1m":
+            batch_size = DEFAULT_BATCH_SIZE
+        else:
+            raise click.ClickException(
+                f"unsupported interval {interval!r}; expected one of {sorted(SUPPORTED_INTERVALS)}"
+            )
+
+    if batch_size_max is not None and batch_size > batch_size_max:
+        raise click.ClickException(
+            f"--batch-size must be <= {batch_size_max} (--batch-size-max); got {batch_size}"
+        )
+
     collector = DailyXtQuantCollector(
         source=source,
-        instrument_repo=_build_instrument_repo(),
+        instrument_repo=instrument_repo,
         kline_repo=_build_kline_repo(),
         sync_state_repo=_build_sync_state_repo(),
         trade_calendar=_build_trade_calendar_repo(),

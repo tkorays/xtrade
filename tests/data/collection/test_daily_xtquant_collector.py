@@ -21,7 +21,7 @@ from xtrade.data.collection.xtquant import (
     MAX_LOOKBACK_DAYS,
     SLOW_FETCH_SECONDS,
     SLOW_UPSERT_SECONDS,
-    VERBOSE_SYMBOL_PROGRESS_FORMAT,
+    VERBOSE_BULK_PROGRESS_FORMAT,
     DailyXtQuantCollector,
     SyncReport,
 )
@@ -42,6 +42,8 @@ class FakeSource:
     bars_by_symbol: dict[str, pd.DataFrame] = field(default_factory=dict)
     errors_by_symbol: dict[str, Exception] = field(default_factory=dict)
     fetch_calls: list[tuple[str, date, date, str]] = field(default_factory=list)
+    bulk_calls: list[tuple[tuple[str, ...], date, date, str]] = field(default_factory=list)
+    bulk_failures: int = 0
 
     def fetch_instruments(self) -> list[Instrument]:
         return list(self.instruments)
@@ -54,6 +56,40 @@ class FakeSource:
         if df is None:
             return pd.DataFrame()
         return df.copy()
+
+    def fetch_bars_bulk(
+        self, symbols: list[str], start: date, end: date, interval: str
+    ) -> pd.DataFrame:
+        self.bulk_calls.append((tuple(symbols), start, end, interval))
+        if self.bulk_failures > 0:
+            self.bulk_failures -= 1
+            raise ConnectionError("simulated MiniQMT drop")
+        frames: list[pd.DataFrame] = []
+        for symbol in symbols:
+            if symbol in self.errors_by_symbol:
+                raise self.errors_by_symbol[symbol]
+            df = self.bars_by_symbol.get(symbol)
+            if df is None or df.empty:
+                continue
+            sub = df.copy()
+            sub["symbol"] = symbol
+            sub["interval"] = interval
+            frames.append(sub)
+        if not frames:
+            return pd.DataFrame(
+                columns=[
+                    "symbol",
+                    "time",
+                    "interval",
+                    "open",
+                    "high",
+                    "low",
+                    "close",
+                    "volume",
+                    "amount",
+                ]
+            )
+        return pd.concat(frames, ignore_index=True)
 
     def fetch_adjust_factors(self, symbol: str, start: date, end: date) -> pd.DataFrame:
         return pd.DataFrame(columns=["symbol", "ex_date", "factor"])
@@ -299,11 +335,11 @@ def test_run_with_existing_watermark_resumes_from_lookback() -> None:
 
     report = collector.run("1d", lookback_days=3)
     assert report.status == "ok"
-    # ``source.fetch_bars`` was called with start = last_td - 3 days,
+    # ``source.fetch_bars_bulk`` was called with start = last_td - 3 days,
     # end = today.
-    assert len(src.fetch_calls) == 1
-    sym, start, end_arg, interval = src.fetch_calls[0]
-    assert sym == "AAA"
+    assert len(src.bulk_calls) == 1
+    syms, start, end_arg, interval = src.bulk_calls[0]
+    assert list(syms) == ["AAA"]
     assert interval == "1d"
     assert (end_arg - start).days == (today - (last_td - timedelta(days=3))).days
 
@@ -315,10 +351,11 @@ def test_run_with_existing_watermark_resumes_from_lookback() -> None:
 def test_run_partial_failure_records_skipped() -> None:
     today = datetime.now(UTC).date()
     dates = [today - timedelta(days=d) for d in range(MAX_LOOKBACK_DAYS + 5)]
+    # ``BAD`` is registered as an instrument but has no bars in the
+    # fake source — xtquant returned no rows for it. ``AAA`` is fine.
     src = FakeSource(
         instruments=[_make_instrument("AAA"), _make_instrument("BAD")],
         bars_by_symbol={"AAA": _make_bars_frame([today - timedelta(days=1)], "1d")},
-        errors_by_symbol={"BAD": RuntimeError("simulated fetch error")},
     )
     collector, kline_repo, sync_state_repo = _build_collector(source=src, trading_days=dates)
 
@@ -327,7 +364,7 @@ def test_run_partial_failure_records_skipped() -> None:
     assert report.rows_written == 1
     assert report.skipped_count == 1
     assert report.symbols_skipped[0][0] == "BAD"
-    assert "simulated fetch error" in report.symbols_skipped[0][1]
+    assert "empty frame" in report.symbols_skipped[0][1]
 
     # Watermark advanced; the run is NOT marked failed.
     wm = sync_state_repo.get("xtquant", "1d")
@@ -351,7 +388,10 @@ def test_run_no_rows_marks_failed() -> None:
     report = collector.run("1d")
     assert report.status == "failed"
     assert report.rows_written == 0
-    assert report.symbols_skipped == []
+    # Under bulk-fetch semantics, missing symbols are recorded as
+    # skipped with the "empty frame" reason.
+    assert len(report.symbols_skipped) == 2
+    assert all("empty frame" in msg for _, msg in report.symbols_skipped)
 
     wm = sync_state_repo.get("xtquant", "1d")
     assert wm is not None
@@ -424,9 +464,9 @@ def test_run_start_and_end_date_override_window() -> None:
         end_date=date(2024, 1, 31),
     )
     assert report.status == "ok"
-    assert len(src.fetch_calls) == 1
-    sym, start, end_arg, interval = src.fetch_calls[0]
-    assert sym == "AAA"
+    assert len(src.bulk_calls) == 1
+    syms, start, end_arg, interval = src.bulk_calls[0]
+    assert list(syms) == ["AAA"]
     assert start == date(2024, 1, 1)
     assert end_arg == date(2024, 1, 31)
     assert interval == "1d"
@@ -453,8 +493,8 @@ def test_run_only_end_date_keeps_watermark_leading_edge() -> None:
 
     report = collector.run("1d", end_date=date(2024, 1, 10), lookback_days=3)
     assert report.status == "ok"
-    assert len(src.fetch_calls) == 1
-    _, start, end_arg, _ = src.fetch_calls[0]
+    assert len(src.bulk_calls) == 1
+    _, start, end_arg, _ = src.bulk_calls[0]
     assert start == last_td - timedelta(days=3)
     assert end_arg == date(2024, 1, 10)
 
@@ -478,8 +518,8 @@ def test_run_only_start_date_ignores_watermark() -> None:
 
     report = collector.run("1d", start_date=today - timedelta(days=2))
     assert report.status == "ok"
-    assert len(src.fetch_calls) == 1
-    _, start, end_arg, _ = src.fetch_calls[0]
+    assert len(src.bulk_calls) == 1
+    _, start, end_arg, _ = src.bulk_calls[0]
     assert start == today - timedelta(days=2)
     assert end_arg == today
 
@@ -495,6 +535,7 @@ def test_run_start_after_end_raises_before_any_io() -> None:
         collector.run("1d", start_date=date(2024, 2, 1), end_date=date(2024, 1, 1))
 
     assert src.fetch_calls == []
+    assert src.bulk_calls == []
     assert sync_state_repo.get("xtquant", "1d") is None
 
 
@@ -619,7 +660,7 @@ def test_per_batch_info_line(caplog: pytest.LogCaptureFixture) -> None:
 
 
 def test_slow_fetch_warning(caplog: pytest.LogCaptureFixture) -> None:
-    """Threshold=0 makes every non-zero ``fetch_bars`` call trip the WARN."""
+    """Threshold=0 makes every bulk fetch trip the WARN."""
     src = FakeSource(
         instruments=[_make_instrument("AAA")],
         bars_by_symbol={"AAA": _make_bars_frame([date(2024, 1, 5)], "1d")},
@@ -630,7 +671,7 @@ def test_slow_fetch_warning(caplog: pytest.LogCaptureFixture) -> None:
         collector.run("1d")
 
     warns = _records_with_substring(caplog.records, "slow fetch")
-    assert any("symbol=AAA" in r.getMessage() for r in warns)
+    assert any("batch_size=" in r.getMessage() for r in warns)
     # The collector must still report success; the WARN is non-fatal.
     assert any(r.levelno == logging.WARNING for r in caplog.records)
 
@@ -677,14 +718,173 @@ def test_default_thresholds_match_constants() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Bulk-fetch behaviour (xtquant-bulk-fetch change)
+# ---------------------------------------------------------------------------
+
+
+def test_bulk_fetch_one_call_per_batch() -> None:
+    """The collector calls ``fetch_bars_bulk`` once per batch."""
+    today = datetime.now(UTC).date()
+    dates = [today - timedelta(days=d) for d in range(MAX_LOOKBACK_DAYS + 5)]
+    symbols = [_make_instrument(f"S{i:02d}") for i in range(5)]
+    src = FakeSource(
+        instruments=symbols,
+        bars_by_symbol={s.symbol: _make_bars_frame([today], "1d") for s in symbols},
+    )
+    collector, kline_repo, _ = _build_collector(source=src, trading_days=dates)
+
+    report = collector.run("1d", batch_size=2)
+    assert report.status == "ok"
+    # 5 symbols / batch_size=2 = 3 batches → 3 bulk calls, 3 upsert calls.
+    assert len(src.bulk_calls) == 3
+    assert [len(call[0]) for call in src.bulk_calls] == [2, 2, 1]
+    assert len(kline_repo.upserted) == 3
+
+
+def test_bulk_fetch_failure_retries_once() -> None:
+    """First bulk call raises, second succeeds — run proceeds normally."""
+    today = datetime.now(UTC).date()
+    dates = [today - timedelta(days=d) for d in range(MAX_LOOKBACK_DAYS + 5)]
+    symbols = [_make_instrument("AAA"), _make_instrument("BBB")]
+    src = FakeSource(
+        instruments=symbols,
+        bars_by_symbol={s.symbol: _make_bars_frame([today], "1d") for s in symbols},
+        bulk_failures=1,
+    )
+    collector, _, sync_state_repo = _build_collector(source=src, trading_days=dates)
+
+    report = collector.run("1d")
+    assert report.status == "ok"
+    # Two bulk calls: one that failed + one retry.
+    assert len(src.bulk_calls) == 2
+    assert report.rows_written == 2
+    assert report.symbols_skipped == []
+    wm = sync_state_repo.get("xtquant", "1d")
+    assert wm is not None and wm.status == "ok"
+
+
+def test_bulk_fetch_failure_twice_skips_entire_batch() -> None:
+    """Both bulk calls raise — every symbol in the batch is skipped."""
+    today = datetime.now(UTC).date()
+    dates = [today - timedelta(days=d) for d in range(MAX_LOOKBACK_DAYS + 5)]
+    symbols = [_make_instrument("AAA"), _make_instrument("BBB")]
+    src = FakeSource(
+        instruments=symbols,
+        bars_by_symbol={s.symbol: _make_bars_frame([today], "1d") for s in symbols},
+        bulk_failures=99,  # fail on every attempt
+    )
+    collector, kline_repo, sync_state_repo = _build_collector(source=src, trading_days=dates)
+
+    report = collector.run("1d")
+    assert report.status == "failed"
+    assert report.rows_written == 0
+    assert report.skipped_count == 2
+    skipped_syms = {s for s, _ in report.symbols_skipped}
+    assert skipped_syms == {"AAA", "BBB"}
+    # Two bulk calls per batch (initial + retry).
+    assert len(src.bulk_calls) == 2
+    # No upserts happened.
+    assert len(kline_repo.upserted) == 0
+    # Watermark should be marked failed.
+    wm = sync_state_repo.get("xtquant", "1d")
+    assert wm is not None
+    assert wm.status == "failed"
+
+
+def test_bulk_fetch_partial_empty_symbols_recorded_as_skipped() -> None:
+    """Some symbols in the batch are absent from the bulk result."""
+    today = datetime.now(UTC).date()
+    dates = [today - timedelta(days=d) for d in range(MAX_LOOKBACK_DAYS + 5)]
+    src = FakeSource(
+        instruments=[_make_instrument("AAA"), _make_instrument("EMPTY")],
+        bars_by_symbol={"AAA": _make_bars_frame([today], "1d")},
+    )
+    collector, kline_repo, _ = _build_collector(source=src, trading_days=dates)
+
+    report = collector.run("1d")
+    assert report.status == "ok"
+    assert report.rows_written == 1
+    assert report.skipped_count == 1
+    assert report.symbols_skipped[0][0] == "EMPTY"
+    assert "empty frame" in report.symbols_skipped[0][1]
+    # Only AAA's rows are upserted.
+    assert len(kline_repo.upserted) == 1
+
+
+def test_bulk_fetch_drops_all_nan_ohlc_rows() -> None:
+    """Regression: xtquant returns rows with all NaN OHLC for some symbols
+    (delisted, suspended, or no history). Those rows MUST be dropped
+    before ``upsert_bars`` because the kline_* tables have NOT NULL on
+    open/high/low/close. Symbols whose ENTIRE set of rows are NaN are
+    recorded as skipped with a reason; symbols with mixed (some good,
+    some NaN) rows keep the good rows and drop the NaN ones.
+    """
+    import numpy as np
+
+    today = datetime.now(UTC).date()
+    dates = [today - timedelta(days=d) for d in range(MAX_LOOKBACK_DAYS + 5)]
+    good_frame = _make_bars_frame([today, today - timedelta(days=1)], "1d")
+    nan_frame = pd.DataFrame(
+        {
+            "time": [today, today - timedelta(days=1)],
+            "open": [np.nan, np.nan],
+            "high": [np.nan, np.nan],
+            "low": [np.nan, np.nan],
+            "close": [np.nan, np.nan],
+            "volume": [0, 0],
+            "amount": [0.0, 0.0],
+        }
+    )
+    src = FakeSource(
+        instruments=[
+            _make_instrument("GOOD"),
+            _make_instrument("DELISTED"),
+            _make_instrument("MIXED"),
+        ],
+        bars_by_symbol={
+            "GOOD": good_frame,
+            "DELISTED": nan_frame,
+            # MIXED has 1 good row + 1 NaN row.
+            "MIXED": pd.concat(
+                [
+                    _make_bars_frame([today], "1d"),
+                    pd.DataFrame(
+                        {
+                            "time": [today - timedelta(days=1)],
+                            "open": [np.nan],
+                            "high": [np.nan],
+                            "low": [np.nan],
+                            "close": [np.nan],
+                            "volume": [0],
+                            "amount": [0.0],
+                        }
+                    ),
+                ]
+            ).reset_index(drop=True),
+        },
+    )
+    collector, kline_repo, _ = _build_collector(source=src, trading_days=dates)
+
+    report = collector.run("1d")
+    assert report.status == "ok"
+    # GOOD contributes 2 rows, MIXED contributes 1 (the NaN row dropped).
+    assert report.rows_written == 3
+    # DELISTED is fully NaN → skipped; MIXED is partially NaN but kept.
+    assert report.skipped_count == 1
+    assert report.symbols_skipped[0][0] == "DELISTED"
+    assert "all NaN OHLC" in report.symbols_skipped[0][1]
+    # The upserted frame must not contain any NaN in OHLC columns.
+    upserted = kline_repo.upserted[0]
+    assert not upserted[["open", "high", "low", "close"]].isna().any().any()
+
+
+# ---------------------------------------------------------------------------
 # Per-symbol DEBUG progress line
 # ---------------------------------------------------------------------------
 
 
-def test_debug_line_per_symbol(caplog: pytest.LogCaptureFixture) -> None:
-    """When DEBUG is enabled, one line per symbol is emitted before each
-    ``fetch_bars`` call. The line carries the run-wide 1-based index and
-    the symbol name."""
+def test_debug_line_per_batch(caplog: pytest.LogCaptureFixture) -> None:
+    """When DEBUG is enabled, one line per bulk batch is emitted."""
     today = datetime.now(UTC).date()
     dates = [today - timedelta(days=d) for d in range(MAX_LOOKBACK_DAYS + 5)]
     symbols = [_make_instrument(f"S{i:02d}") for i in range(3)]
@@ -695,7 +895,7 @@ def test_debug_line_per_symbol(caplog: pytest.LogCaptureFixture) -> None:
     collector, _, _ = _build_collector(source=src, trading_days=dates)
 
     with caplog.at_level(logging.DEBUG, logger=_LOGGER_NAME):
-        report = collector.run("1d")
+        report = collector.run("1d", batch_size=2)
     assert report.status == "ok"
 
     debug_msgs = [
@@ -703,20 +903,16 @@ def test_debug_line_per_symbol(caplog: pytest.LogCaptureFixture) -> None:
         for r in caplog.records
         if r.name == _LOGGER_NAME and r.levelno == logging.DEBUG
     ]
-    # Exactly one DEBUG line per symbol in the run.
-    assert len(debug_msgs) == 3
-    assert "sym=S00" in debug_msgs[0] and "1/3" in debug_msgs[0]
-    assert "sym=S01" in debug_msgs[1] and "2/3" in debug_msgs[1]
-    assert "sym=S02" in debug_msgs[2] and "3/3" in debug_msgs[2]
-    # The interval appears in every line.
+    # Exactly one DEBUG line per batch (3 symbols / batch_size=2 = 2 batches).
+    assert len(debug_msgs) == 2
+    assert "bulk-fetch" in debug_msgs[0] and "syms=2" in debug_msgs[0]
+    assert "bulk-fetch" in debug_msgs[1] and "syms=1" in debug_msgs[1]
     for msg in debug_msgs:
         assert "interval=1d" in msg
 
 
 def test_debug_line_suppressed_at_info_level(caplog: pytest.LogCaptureFixture) -> None:
-    """At the default INFO level, no per-symbol DEBUG records are
-    captured. The DEBUG lines are still emitted but discarded by the
-    logger."""
+    """At the default INFO level, no bulk DEBUG records are captured."""
     today = datetime.now(UTC).date()
     dates = [today - timedelta(days=d) for d in range(MAX_LOOKBACK_DAYS + 5)]
     symbols = [_make_instrument("AAA"), _make_instrument("BBB")]
@@ -735,14 +931,15 @@ def test_debug_line_suppressed_at_info_level(caplog: pytest.LogCaptureFixture) -
         if r.name == _LOGGER_NAME and r.levelno == logging.DEBUG
     ]
     assert debug_msgs == []
-    # Per-batch INFO records still fired.
     info_batch = [r.getMessage() for r in caplog.records if r.getMessage().startswith("batch ")]
     assert len(info_batch) == 1
 
 
 def test_verbose_format_constant_contains_required_keys() -> None:
-    """The format string carries the three keys the spec requires."""
-    assert isinstance(VERBOSE_SYMBOL_PROGRESS_FORMAT, str)
-    assert "symbol" in VERBOSE_SYMBOL_PROGRESS_FORMAT
-    assert "sym" in VERBOSE_SYMBOL_PROGRESS_FORMAT
-    assert "interval" in VERBOSE_SYMBOL_PROGRESS_FORMAT
+    """The bulk-format string carries the keys the spec requires."""
+    assert isinstance(VERBOSE_BULK_PROGRESS_FORMAT, str)
+    assert "bulk-fetch" in VERBOSE_BULK_PROGRESS_FORMAT
+    assert "batch_size" in VERBOSE_BULK_PROGRESS_FORMAT
+    assert "interval" in VERBOSE_BULK_PROGRESS_FORMAT
+    assert "first_symbol" in VERBOSE_BULK_PROGRESS_FORMAT
+    assert "last_symbol" in VERBOSE_BULK_PROGRESS_FORMAT

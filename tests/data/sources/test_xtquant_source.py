@@ -184,6 +184,12 @@ def test_xtquant_data_source_fetch_bars_rejects_unknown_interval() -> None:
         src.fetch_bars("000001.SZ", date(2024, 1, 1), date(2024, 1, 5), "5m")
 
 
+def test_xtquant_data_source_fetch_bars_bulk_rejects_unknown_interval() -> None:
+    src = XtQuantDataSource()
+    with pytest.raises(ValueError, match="unsupported interval"):
+        src.fetch_bars_bulk(["000001.SZ"], date(2024, 1, 1), date(2024, 1, 5), "5m")
+
+
 def test_xtquant_data_source_instruments_empty() -> None:
     assert XtQuantDataSource().fetch_instruments() == []
 

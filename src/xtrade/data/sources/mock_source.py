@@ -49,6 +49,56 @@ class InMemoryMockSource:
         out: pd.DataFrame = df.loc[mask].copy()
         return out
 
+    def fetch_bars_bulk(
+        self, symbols: list[str], start: date, end: date, interval: str
+    ) -> pd.DataFrame:
+        """Aggregate per-symbol frames into one long-format DataFrame.
+
+        Symbols absent from ``self._bars`` are omitted (consistent with
+        :meth:`XtQuantDataSource.fetch_bars_bulk` semantics: "no data in
+        window"). The returned frame has columns ``symbol, time,
+        open, high, low, close, volume, amount``.
+        """
+        frames: list[pd.DataFrame] = []
+        for symbol in symbols:
+            df = self._bars.get(symbol)
+            if df is None or df.empty:
+                continue
+            mask = (df["time"].dt.date >= start) & (df["time"].dt.date <= end)
+            sub = df.loc[mask].copy()
+            if sub.empty:
+                continue
+            sub = sub.copy()
+            sub["symbol"] = symbol
+            sub["interval"] = interval
+            frames.append(sub)
+        if not frames:
+            return pd.DataFrame(
+                columns=[
+                    "symbol",
+                    "time",
+                    "open",
+                    "high",
+                    "low",
+                    "close",
+                    "volume",
+                    "amount",
+                ]
+            )
+        out = pd.concat(frames, ignore_index=True)
+        return out[
+            [
+                "symbol",
+                "time",
+                "open",
+                "high",
+                "low",
+                "close",
+                "volume",
+                "amount",
+            ]
+        ].copy()
+
     def fetch_adjust_factors(self, symbol: str, start: date, end: date) -> pd.DataFrame:
         df = self._adj_factors.get(symbol)
         if df is None or df.empty:

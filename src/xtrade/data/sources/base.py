@@ -15,7 +15,7 @@ from xtrade.data.market_data.instrument import Instrument
 class DataSource(Protocol):
     """Producer-side abstraction for fetching market reference data.
 
-    Concrete sources (Tushare, AKShare, CSV, ...) implement the four
+    Concrete sources (Tushare, AKShare, CSV, ...) implement the five
     ``fetch_*`` methods. The Protocol is structural — any class with
     matching methods satisfies it without inheritance.
     """
@@ -23,6 +23,10 @@ class DataSource(Protocol):
     def fetch_instruments(self) -> list[Instrument]: ...
 
     def fetch_bars(self, symbol: str, start: date, end: date, interval: str) -> pd.DataFrame: ...
+
+    def fetch_bars_bulk(
+        self, symbols: list[str], start: date, end: date, interval: str
+    ) -> pd.DataFrame: ...
 
     def fetch_adjust_factors(self, symbol: str, start: date, end: date) -> pd.DataFrame: ...
 
